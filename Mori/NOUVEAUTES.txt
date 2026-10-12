@@ -1,3 +1,8 @@
+2.12.2
+- Mori Console : elle se précharge en arrière-plan et s'affiche aussitôt au raccourci (plus de fenêtre blanche sur Mac). Redémarrez Premiere après la mise à jour.
+- Mori Console (Mac) : les flèches, Tab, Entrée et Échap répondent.
+- Installeur Mac : le résultat s'affiche dans une fenêtre qui se ferme normalement.
+
 2.12.1
 - Mori Console : l'effet Transformation arrive avec « Échelle uniforme » cochée, comme depuis le panneau Effets.
 - Nouveau logo : le kanji 守 (« le gardien »).

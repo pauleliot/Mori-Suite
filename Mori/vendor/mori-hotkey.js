@@ -17,11 +17,18 @@
   var stopped = false;
   var retry = null;
 
-  function openConsole() {
+  // La console est préchargée sans s'afficher (voir plus bas) : la demande l'affiche aussitôt. Si elle n'était pas
+  // chargée, la demande la démarre mais elle reste cachée : on redemande dès que sa page se dit chargée.
+  var pendingUntil = 0;
+  function requestConsole() {
     // pont natif de CEP : le CSInterface.js livré avec Mori est réduit et n'a pas requestOpenExtension
     try {
       if (window.__adobe_cep__ && window.__adobe_cep__.requestOpenExtension) window.__adobe_cep__.requestOpenExtension(CONSOLE_ID, '');
     } catch (e) {}
+  }
+  function openConsole() {
+    pendingUntil = Date.now() + 4000;
+    requestConsole();
   }
 
   function extensionDir() {
@@ -385,11 +392,31 @@
   try {
     var bridge = window.__adobe_cep__;
     if (bridge && bridge.addEventListener) {
-      bridge.addEventListener('com.mori.console.ready', function () {
+      bridge.addEventListener('com.mori.console.ready', function (ev) {
+        var what = '';
+        try { what = String((typeof ev === 'string' ? JSON.parse(ev) : ev).data || ''); } catch (e) {}
+        // démarrée par le raccourci, encore cachée : une demande l'affiche, la suivante lui donne le clavier
+        if (what === 'load' && Date.now() < pendingUntil) {
+          requestConsole();
+          setTimeout(requestConsole, 200);
+        }
+        pendingUntil = 0;
         sendTheme();
         sendPresets();
       });
       bridge.addEventListener('com.mori.console.applyPreset', applyPreset);
+      // console préchargée, cachée, pour s'afficher sans délai au raccourci (le manifeste la démarre sans l'afficher
+      // sur cet événement) : au démarrage de Premiere, après chaque fermeture, puis régulièrement, car la fermeture
+      // par la croix ne prévient pas. Sans effet quand la console est déjà chargée ou affichée.
+      var prewarm = function (delay) {
+        setTimeout(function () { sendCepEvent('com.mori.console.prewarm', ''); }, delay);
+      };
+      bridge.addEventListener('com.mori.console.closed', function () {
+        pendingUntil = 0;
+        prewarm(700);
+      });
+      prewarm(5000);
+      setInterval(function () { prewarm(0); }, 4000);
     }
   } catch (e) {}
 

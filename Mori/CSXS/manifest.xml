@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="10.0" ExtensionBundleId="com.mori.studio.panel" ExtensionBundleVersion="2.12.1" ExtensionBundleName="Mori" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<ExtensionManifest Version="10.0" ExtensionBundleId="com.mori.studio.panel" ExtensionBundleVersion="2.12.2" ExtensionBundleName="Mori" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ExtensionList>
-    <Extension Id="com.mori.studio.panel" Version="2.12.1" />
-    <Extension Id="com.mori.studio.console" Version="2.12.1" />
-    <Extension Id="com.mori.studio.hotkey" Version="2.12.1" />
+    <Extension Id="com.mori.studio.panel" Version="2.12.2" />
+    <Extension Id="com.mori.studio.console" Version="2.12.2" />
+    <Extension Id="com.mori.studio.hotkey" Version="2.12.2" />
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>
@@ -59,8 +59,12 @@
           <MainPath>./console.html</MainPath>
           <!-- ni Node ni script ExtendScript chargé au démarrage : la fenêtre s'ouvre plus vite -->
         </Resources>
+        <!-- préchargée sans s'afficher (événement envoyé par mori-hotkey.js), montrée par le raccourci ou le menu -->
         <Lifecycle>
-          <AutoVisible>true</AutoVisible>
+          <AutoVisible>false</AutoVisible>
+          <StartOn>
+            <Event>com.mori.console.prewarm</Event>
+          </StartOn>
         </Lifecycle>
         <UI>
           <Type>Modeless</Type>

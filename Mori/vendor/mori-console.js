@@ -116,6 +116,16 @@
       return null;
     }
   }
+  // macOS : Premiere garde pour lui les flèches, Tab, Entrée, Échap et ⌘D tant que la fenêtre ne les réclame pas
+  // (codes de touches macOS ; sous Windows elles arrivent d'elles-mêmes)
+  try {
+    if (cep && cep.registerKeyEventsInterest && /Mac/i.test(navigator.platform || navigator.userAgent || '')) {
+      cep.registerKeyEventsInterest(JSON.stringify([
+        { keyCode: 126 }, { keyCode: 125 }, { keyCode: 123 }, { keyCode: 124 }, { keyCode: 48 }, { keyCode: 53 },
+        { keyCode: 36 }, { keyCode: 36, shiftKey: true }, { keyCode: 76 }, { keyCode: 76, shiftKey: true }, { keyCode: 2, metaKey: true }
+      ]));
+    }
+  } catch (e) {}
   var presets = read('mori.console.presets', []);
   var presetSource = '', pendingPreset = null, started = false;
   // la console n'a pas Node : le thème vient de la fenêtre cachée de Mori (événement CEP), et le dernier reçu est
@@ -151,7 +161,8 @@
         var data = eventData(ev);
         if (data && pendingPreset && data.id === pendingPreset.id) pendingPreset.done(String(data.result || ''));
       });
-      sendCepEvent('com.mori.console.ready', '');
+      // « load » : page chargée (peut-être sans être affichée) ; « show » : fenêtre passée au premier plan
+      sendCepEvent('com.mori.console.ready', 'load');
     } catch (e) {}
   }
 
@@ -357,7 +368,17 @@
     });
   }
 
+  // À la fermeture, la fenêtre cachée de Mori recharge la console en arrière-plan : l'ouverture suivante n'a plus
+  // à démarrer la page (sur macOS, ce démarrage laissait une fenêtre blanche pendant une seconde)
+  var closedSent = false;
+  function announceClosed() {
+    if (closedSent) return;
+    closedSent = true;
+    try { sendCepEvent('com.mori.console.closed', ''); } catch (e) {}
+  }
+  window.addEventListener('beforeunload', announceClosed);
   function closeWindow() {
+    announceClosed();
     try {
       if (cep) cep.closeExtension();
     } catch (e) {}
@@ -465,7 +486,13 @@
     });
   });
   // à chaque ouverture : champ prêt à taper, texte précédent sélectionné
+  var shownAt = Date.now();
   var focus = function () {
+    // console préchargée puis affichée : thème et presets redemandés (ils ont pu changer depuis le préchargement)
+    if (Date.now() - shownAt > 300) {
+      shownAt = Date.now();
+      try { sendCepEvent('com.mori.console.ready', 'show'); } catch (e) {}
+    }
     setInfo('');
     setTimeout(function () {
       input.focus();
@@ -473,6 +500,9 @@
     }, 20);
   };
   window.addEventListener('focus', focus);
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) focus();
+  });
 
   started = true;
   render();

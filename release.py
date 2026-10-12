@@ -240,7 +240,8 @@ else
 fi
 """
 # Fenêtre de l'installeur macOS (JavaScript for Automation + Cocoa, livrés avec macOS) : reste affichée pendant toute
-# l'installation (barre de progression, étape lue dans le journal du script), puis affiche le résultat avec « Fermer ».
+# l'installation (barre de progression, étape lue dans le journal du script) ; le résultat s'affiche ensuite dans une
+# boîte de dialogue du système.
 # Écrit « STARTED » (ou « CANCELLED ») sur la sortie : sinon, le lanceur repasse aux boîtes de dialogue simples.
 # Arguments : nom, version, menu Premiere, script « Installer <Nom>.command », journal.
 INSTALLER_UI = r"""ObjC.import('Cocoa');
@@ -266,6 +267,23 @@ function run(argv) {
     } catch (e) {
       return false;
     }
+  }
+  // résultat : boîte de dialogue du système (se ferme toujours) ; en cas d'échec, un bouton ouvre le journal
+  var resultShown = false;
+  function result(done) {
+    if (resultShown) return;
+    resultShown = true;
+    try {
+      sa.activate();
+      if (done) {
+        sa.displayDialog(name + ' est installé.\n\nOuvrez Premiere Pro, puis : Fenêtre > Extensions > ' + menu + '.',
+          { withTitle: name, buttons: ['OK'], defaultButton: 'OK', withIcon: 'note' });
+      } else {
+        var r = sa.displayDialog("L'installation n'a pas abouti.\n\nRelancez l'installeur pour réessayer. Détails : " + logPath,
+          { withTitle: name, buttons: ['Voir le journal', 'OK'], defaultButton: 'OK', withIcon: 'caution' });
+        if (r.buttonReturned === 'Voir le journal') sa.doShellScript('open -e "' + logPath.replace(/"/g, '\\"') + '"');
+      }
+    } catch (e) {}
   }
   if (!ask('Installer ' + name + ' ' + version + ' dans Premiere Pro ?', 'Installer')) return out('CANCELLED');
   while (sa.doShellScript('pgrep -qf "Adobe Premiere Pro" && echo 1 || echo 0') === '1') {
@@ -361,60 +379,24 @@ function run(argv) {
       if (lines.length) detail.stringValue = lines[lines.length - 1];
     }
 
-    // ---- résultat : la fenêtre reste jusqu'à « Fermer » ----
+    // ---- résultat ----
+    // La fenêtre de progression se retire et le résultat s'affiche dans une boîte de dialogue du système : des
+    // boutons posés dans cette fenêtre ne répondaient pas (boucle d'événements tenue à la main), elle restait bloquée
     var ok = task.terminationStatus === 0;
-    bar.stopAnimation($());
-    bar.hidden = true;
-    title.stringValue = ok ? name + ' est installé' : "L'installation n'a pas abouti";
-    detail.stringValue = ok ? 'Tout est prêt.' : 'Relancez l\'installeur pour réessayer.';
-    hint.stringValue = ok
-      ? 'Ouvrez Premiere Pro, puis : Fenêtre > Extensions > ' + menu + '.'
-      : 'Détails dans le journal : ' + logPath;
-    // boutons à bascule (type 1 = NSButtonTypePushOnPushOff, style 1 = arrondi) : un clic se lit dans leur état
-    function button(titleText, x, isDefault) {
-      var b = $.NSButton.alloc.initWithFrame($.NSMakeRect(x, 16, 130, 32));
-      b.title = titleText;
-      b.bezelStyle = 1;
-      b.setButtonType(1);
-      if (isDefault) b.keyEquivalent = '\r';
-      view.addSubview(b);
-      return b;
-    }
-    // le texte du résultat prend la place de la barre, bien au-dessus des boutons
-    hint.frame = $.NSMakeRect(100, 64, W - 120, 40);
-    var close = button('Fermer', W - 150, true);
-    var showLog = ok ? null : button('Voir le journal', W - 290, false);
     out(ok ? 'DONE' : 'FAILED');
-    // « Fermer » quitte aussi directement (action Cocoa), et la fenêtre a maintenant sa pastille rouge
-    try {
-      close.target = app;
-      close.action = 'terminate:';
-    } catch (e) {}
-    try { win.styleMask = 1 | 2; } catch (e) {}
-    app.activateIgnoringOtherApps(true);
-    win.makeKeyAndOrderFront($());
-    var pressed = function (b) { return !!b && Number(b.state) > 0; };
-    for (;;) {
-      pump(0.2);
-      if (pressed(close) || !win.isVisible) break;
-      if (pressed(showLog)) {
-        showLog.state = 0;
-        sa.doShellScript('open -e "' + logPath.replace(/"/g, '\\"') + '"');
-      }
-    }
-    win.orderOut($());
+    try { bar.stopAnimation($()); } catch (e4) {}
+    try { win.orderOut($()); } catch (e5) {}
+    try { pump(0.05); } catch (e6) {}
+    win = null;
+    result(ok);
   } catch (e) {
     try { if (win) win.orderOut($()); } catch (e2) {}
     if (!task) return;
-    if (!task.isRunning) return; // résultat déjà affiché et écrit
+    var wasRunning = task.isRunning;
     task.waitUntilExit;
     var done = task.terminationStatus === 0;
-    try {
-      sa.activate();
-      sa.displayDialog(done ? name + ' est installé.\n\nOuvrez Premiere Pro, puis : Fenêtre > Extensions > ' + menu + '.'
-        : "L'installation n'a pas abouti.\n\nDétails : " + logPath, { withTitle: name, buttons: ['OK'], defaultButton: 'OK', withIcon: done ? 'note' : 'caution' });
-    } catch (e3) {}
-    out(done ? 'DONE' : 'FAILED');
+    if (wasRunning) out(done ? 'DONE' : 'FAILED');
+    result(done);
   }
 }
 """
