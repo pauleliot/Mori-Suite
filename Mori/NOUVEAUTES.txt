@@ -1,3 +1,6 @@
+2.12.3
+- Réglages > Configuration : « Créer un rapport de diagnostic » écrit sur le Bureau un fichier à envoyer en cas de problème (système, Premiere, console, raccourci, journaux). Rien n'est envoyé automatiquement.
+
 2.12.2
 - Mori Console : elle se précharge en arrière-plan et s'affiche aussitôt au raccourci (plus de fenêtre blanche sur Mac). Redémarrez Premiere après la mise à jour.
 - Mori Console (Mac) : les flèches, Tab, Entrée et Échap répondent.

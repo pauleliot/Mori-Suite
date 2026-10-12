@@ -8343,6 +8343,55 @@ export function parseProfileCode(code: string): Profile {
 }
 
 
+// ==================== components/DiagnosticSection.tsx ====================
+/** Rapport de diagnostic (vendor/mori-diagnostic.js) : un fichier texte sur le Bureau, à envoyer en cas de problème */
+const DiagnosticSection: React.FC = () => {
+  const [state, setState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
+  const [message, setMessage] = useState('');
+  const create = () => {
+    const diagnostic = (window as any).MoriDiagnostic;
+    if (!diagnostic) {
+      setState('error');
+      setMessage('Redémarrez Premiere Pro pour terminer la mise à jour de Mori.');
+      return;
+    }
+    setState('busy');
+    setMessage('');
+    diagnostic.run().then(
+      (r: { file: string }) => {
+        setState('done');
+        setMessage(r.file);
+      },
+      (e: any) => {
+        setState('error');
+        setMessage(String((e && e.message) || e));
+      },
+    );
+  };
+  return (
+    <div className="space-y-2 pt-3 mt-3 border-t border-white/10">
+      <div>
+        <h3 className="font-bold text-white text-xs">Diagnostic</h3>
+        <p className="text-zinc-300 text-[11px] leading-snug">
+          En cas de problème, créez un rapport et envoyez le fichier : système, version de Premiere, état de la console et de son raccourci,
+          journaux. Le contenu de vos projets n'est pas lu, et rien n'est envoyé automatiquement.
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={create}
+        disabled={state === 'busy'}
+        className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[11px] font-semibold transition cursor-pointer disabled:opacity-40 disabled:cursor-default"
+      >
+        <Activity className="w-3 h-3" />
+        {state === 'busy' ? 'Création du rapport… (10 s)' : 'Créer un rapport de diagnostic'}
+      </button>
+      {state === 'done' && <p className="text-[11px] text-emerald-400 break-all">Rapport créé sur le Bureau : {message}</p>}
+      {state === 'error' && <p className="text-[11px] text-red-400">Rapport impossible : {message}</p>}
+    </div>
+  );
+};
+
 // ==================== components/ProfilesSection.tsx ====================
 
 /** Réglages > Configuration : profils (ensemble des presets de chaque catégorie) */
@@ -9627,6 +9676,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {activeTab === 'norms' && <NormsSettings presets={deliveryPresets} onChange={onUpdateDeliveryPresets} />}
 
           {activeTab === 'profiles' && <ProfilesSection current={profileSnapshot} onApply={applyProfile} />}
+          {activeTab === 'profiles' && <DiagnosticSection />}
 
           {activeTab === 'appearance' && (
             <div className="space-y-5">
@@ -11337,7 +11387,7 @@ export default function App() {
 // ==================== components/AboutMori.tsx ====================
 
 /** Version affichée dans « À propos » : à garder alignée sur CSXS/manifest.xml */
-const APP_VERSION = '2.12.2';
+const APP_VERSION = '2.12.3';
 /** Version de Mori Checker (application autonome) : à garder alignée sur checker/package.json */
 const CHECKER_VERSION = '1.2.0';
 

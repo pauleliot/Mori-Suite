@@ -118,14 +118,27 @@
   }
   // macOS : Premiere garde pour lui les flèches, Tab, Entrée, Échap et ⌘D tant que la fenêtre ne les réclame pas
   // (codes de touches macOS ; sous Windows elles arrivent d'elles-mêmes)
+  var keyInterest = 'non demandé (pas macOS)';
   try {
-    if (cep && cep.registerKeyEventsInterest && /Mac/i.test(navigator.platform || navigator.userAgent || '')) {
-      cep.registerKeyEventsInterest(JSON.stringify([
-        { keyCode: 126 }, { keyCode: 125 }, { keyCode: 123 }, { keyCode: 124 }, { keyCode: 48 }, { keyCode: 53 },
-        { keyCode: 36 }, { keyCode: 36, shiftKey: true }, { keyCode: 76 }, { keyCode: 76, shiftKey: true }, { keyCode: 2, metaKey: true }
-      ]));
+    if (/Mac/i.test(navigator.platform || navigator.userAgent || '')) {
+      if (cep && cep.registerKeyEventsInterest) {
+        cep.registerKeyEventsInterest(JSON.stringify([
+          { keyCode: 126 }, { keyCode: 125 }, { keyCode: 123 }, { keyCode: 124 }, { keyCode: 48 }, { keyCode: 53 },
+          { keyCode: 36 }, { keyCode: 36, shiftKey: true }, { keyCode: 76 }, { keyCode: 76, shiftKey: true }, { keyCode: 2, metaKey: true }
+        ]));
+        keyInterest = 'demandé';
+      } else keyInterest = 'fonction absente';
     }
-  } catch (e) {}
+  } catch (e) {
+    keyInterest = 'erreur : ' + e;
+  }
+  // pour le rapport de diagnostic de Mori : dernières touches spéciales reçues (jamais le texte tapé)
+  var loadedAt = Date.now(), keysSeen = [], shows = 0;
+  document.addEventListener('keydown', function (ev) {
+    if (!ev.key || ev.key.length < 2) return;
+    keysSeen.push(ev.key);
+    if (keysSeen.length > 12) keysSeen.shift();
+  }, true);
   var presets = read('mori.console.presets', []);
   var presetSource = '', pendingPreset = null, started = false;
   // la console n'a pas Node : le thème vient de la fenêtre cachée de Mori (événement CEP), et le dernier reçu est
@@ -156,6 +169,13 @@
         presets = fresh;
         write(KEYS.presets, presets);
         if (typeof render === 'function' && started) render();
+      });
+      cep.addEventListener('com.mori.console.ping', function () {
+        sendCepEvent('com.mori.console.pong', JSON.stringify({
+          plateforme: navigator.platform, chargeeDepuisMs: Date.now() - loadedAt, miseEnPlaceMs: Math.round(window.__consoleReady || 0),
+          affichages: shows, aLeClavier: document.hasFocus(), cachee: document.hidden, taille: window.innerWidth + 'x' + window.innerHeight,
+          touchesReclamees: keyInterest, dernieresTouches: keysSeen, effets: effects.length, presets: presets.length, sourcePresets: presetSource ? 'oui' : 'non'
+        }));
       });
       cep.addEventListener('com.mori.console.presetResult', function (ev) {
         var data = eventData(ev);
@@ -491,6 +511,7 @@
     // console préchargée puis affichée : thème et presets redemandés (ils ont pu changer depuis le préchargement)
     if (Date.now() - shownAt > 300) {
       shownAt = Date.now();
+      shows++;
       try { sendCepEvent('com.mori.console.ready', 'show'); } catch (e) {}
     }
     setInfo('');
