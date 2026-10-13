@@ -3,7 +3,8 @@
  *
  * Écrite sans React ni l'application Mori pour s'ouvrir le plus vite possible : la page ne charge que les styles
  * précompilés, le thème partagé (suite-theme.js) et ce script. On tape le nom d'un effet, Entrée l'applique aux
- * clips sélectionnés de la timeline (effet vidéo -> clips vidéo, effet audio -> clips audio). Les presets de
+ * clips sélectionnés de la timeline (effet vidéo -> clips vidéo, effet audio -> clips audio). Les transitions vidéo
+ * et audio sont proposées aussi : elles se posent aux deux bouts des clips sélectionnés. Les presets de
  * l'utilisateur (panneau Effets > Préconfigurations) sont proposés aussi : la fenêtre cachée de Mori les lit dans
  * le fichier de presets de Premiere et les applique (voir mori-hotkey.js).
  *
@@ -13,7 +14,7 @@
 (function () {
   'use strict';
 
-  var KEYS = { presets: 'mori.console.presets', effects: 'mori.console.effects', favorites: 'mori.console.favorites', recents: 'mori.console.recents', listedAt: 'mori.console.listedAt' };
+  var KEYS = { presets: 'mori.console.presets', effects: 'mori.console.effects', favorites: 'mori.console.favorites', recents: 'mori.console.recents', listedAt: 'mori.console.listedAt2' };
   // la liste des effets n'est redemandée à Premiere qu'après ce délai (elle ne change qu'en installant un plugin)
   var LIST_MAX_AGE_MS = 5 * 60 * 1000;
   var cep = window.__adobe_cep__ || null;
@@ -106,6 +107,15 @@
     try { ext = c.getExtensionId(); } catch (e) {}
     c.dispatchEvent({ type: type, scope: 'APPLICATION', appId: appId, extensionId: ext, data: data });
   }
+  /** Donnée brute d'un événement CEP (texte simple) */
+  function eventData0(ev) {
+    try {
+      var data = typeof ev === 'string' ? JSON.parse(ev) : ev;
+      return data && data.data !== undefined ? data.data : data;
+    } catch (e) {
+      return '';
+    }
+  }
   /** Contenu d'un événement CEP (déjà décodé ou encore en texte selon les versions) */
   function eventData(ev) {
     try {
@@ -119,8 +129,9 @@
   // macOS : Premiere garde pour lui les flèches, Tab, Entrée, Échap et ⌘D tant que la fenêtre ne les réclame pas
   // (codes de touches macOS ; sous Windows elles arrivent d'elles-mêmes)
   var keyInterest = 'non demandé (pas macOS)';
-  try {
-    if (/Mac/i.test(navigator.platform || navigator.userAgent || '')) {
+  function claimKeys() {
+    try {
+      if (!/Mac/i.test(navigator.platform || navigator.userAgent || '')) return;
       if (cep && cep.registerKeyEventsInterest) {
         cep.registerKeyEventsInterest(JSON.stringify([
           { keyCode: 126 }, { keyCode: 125 }, { keyCode: 123 }, { keyCode: 124 }, { keyCode: 48 }, { keyCode: 53 },
@@ -128,16 +139,22 @@
         ]));
         keyInterest = 'demandé';
       } else keyInterest = 'fonction absente';
+    } catch (e) {
+      keyInterest = 'erreur : ' + e;
     }
-  } catch (e) {
-    keyInterest = 'erreur : ' + e;
   }
-  // pour le rapport de diagnostic de Mori : dernières touches spéciales reçues (jamais le texte tapé)
-  var loadedAt = Date.now(), keysSeen = [], shows = 0;
+  claimKeys();
+  // pour le rapport de diagnostic de Mori : dernières touches spéciales reçues (jamais le texte tapé) ; celles
+  // transmises par le script du raccourci (macOS) sont suivies d'une étoile
+  var loadedAt = Date.now(), keysSeen = [], shows = 0, nativeAt = {}, relayedAt = {};
+  function noteKey(name) {
+    keysSeen.push(name);
+    if (keysSeen.length > 12) keysSeen.shift();
+  }
   document.addEventListener('keydown', function (ev) {
     if (!ev.key || ev.key.length < 2) return;
-    keysSeen.push(ev.key);
-    if (keysSeen.length > 12) keysSeen.shift();
+    nativeAt[ev.key] = Date.now();
+    noteKey(ev.key);
   }, true);
   var presets = read('mori.console.presets', []);
   var presetSource = '', pendingPreset = null, started = false;
@@ -177,6 +194,16 @@
           touchesReclamees: keyInterest, dernieresTouches: keysSeen, effets: effects.length, presets: presets.length, sourcePresets: presetSource ? 'oui' : 'non'
         }));
       });
+      // macOS : flèche ou Tab transmise par le script du raccourci (Premiere ne la laisse pas arriver ici).
+      // Ignorée si la page l'a reçue aussi, pour ne pas avancer de deux lignes.
+      cep.addEventListener('com.mori.console.key', function (ev) {
+        var name = String(eventData0(ev));
+        if (!started || !document.hasFocus() || typeof onKey !== 'function') return;
+        if (Date.now() - (nativeAt[name] || 0) < 150) return;
+        relayedAt[name] = Date.now();
+        noteKey(name + '*');
+        onKey(name, false, false);
+      });
       cep.addEventListener('com.mori.console.presetResult', function (ev) {
         var data = eventData(ev);
         if (data && pendingPreset && data.id === pendingPreset.id) pendingPreset.done(String(data.result || ''));
@@ -214,11 +241,49 @@
     return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
   };
 
-  // liste des effets : une ligne par effet, « V\t » ou « A\t » devant (pas de JSON côté ExtendScript)
+  // liste des effets (VST et effets de plugins compris) et des transitions : une ligne par élément, « V\t » effet
+  // vidéo, « A\t » effet audio, « T\t » transition vidéo, « U\t » transition audio (pas de JSON côté ExtendScript)
   var LIST_SCRIPT =
-    '(function(){try{app.enableQE();var v=qe.project.getVideoEffectList(),a=qe.project.getAudioEffectList(),o=[];' +
-    'for(var i=0;i<v.length;i++)o.push("V\\t"+v[i]);for(var j=0;j<a.length;j++)o.push("A\\t"+a[j]);return o.join("\\n");}' +
+    '(function(){try{app.enableQE();var p=qe.project,o=[];function add(l,c){if(!l)return;for(var i=0;i<l.length;i++)o.push(c+"\\t"+l[i]);}' +
+    'add(p.getVideoEffectList(),"V");add(p.getAudioEffectList(),"A");' +
+    'try{add(p.getVideoTransitionList(),"T");add(p.getAudioTransitionList(),"U");}catch(e2){}return o.join("\\n");}' +
     'catch(e){return "ERR|"+e;}})()';
+  var KIND_OF = { V: 'video', A: 'audio', T: 'vtrans', U: 'atrans' };
+  var isTransition = function (e) {
+    return e.kind === 'vtrans' || e.kind === 'atrans';
+  };
+
+  /**
+   * Transition posée aux deux bouts de chaque clip sélectionné (une seule sur la coupe entre deux clips sélectionnés
+   * qui se touchent) : 1 s, ou la moitié du clip s'il est plus court.
+   */
+  function transitionScript(effect) {
+    var audio = effect.kind === 'atrans';
+    return (
+      '(function(){try{' +
+      'var seq=app.project?app.project.activeSequence:null;if(!seq)return "ERR|Ouvrez une séquence dans la timeline";' +
+      'app.enableQE();var qseq=qe.project.getActiveSequence();var name=' + q(effect.name) + ';var audio=' + audio + ';' +
+      'var x=audio?qe.project.getAudioTransitionByName(name):qe.project.getVideoTransitionByName(name);' +
+      'if(!x)return "ERR|Transition introuvable : "+name;' +
+      'var fps=254016000000/Number(seq.timebase);if(!(fps>1))fps=25;var base=Math.round(fps);' +
+      'function two(n){return (n<10?"0":"")+n;}' +
+      'function tc(sec){var f=Math.max(2,Math.round(sec*fps));return "00:00:"+two(Math.floor(f/base))+":"+two(f%base);}' +
+      'var applied=0,missed=0,other=0;' +
+      'function scan(tracks,isAudio,apply){for(var t=0;t<tracks.numTracks;t++){var track=tracks[t],qitems=null,used={},prevEnd=-1;' +
+      'for(var c=0;c<track.clips.numItems;c++){var clip=track.clips[c];if(!clip.isSelected())continue;if(!apply){other++;continue;}' +
+      'if(!qitems){var qt=isAudio?qseq.getAudioTrackAt(t):qseq.getVideoTrackAt(t);qitems=[];' +
+      'for(var k=0;k<qt.numItems;k++){var it=qt.getItemAt(k);if(it&&it.type!=="Empty")qitems.push(it);}}' +
+      'var it2=qitems[c];if(!it2||(it2.name&&clip.name&&it2.name!==clip.name)){it2=null;' +
+      'for(var j=0;j<qitems.length;j++){if(!used[j]&&qitems[j].name===clip.name){it2=qitems[j];used[j]=true;break;}}}else used[c]=true;' +
+      'if(!it2){missed++;continue;}var s=clip.start.seconds,e=clip.end.seconds,d=tc(Math.min(1,(e-s)/2));' +
+      'if(Math.abs(s-prevEnd)>0.002){try{if(it2.addTransition(x,true,d))applied++;}catch(e1){}}' +
+      'try{if(it2.addTransition(x,false,d))applied++;}catch(e2){}prevEnd=e;}}}' +
+      'scan(seq.videoTracks,false,!audio);scan(seq.audioTracks,true,audio);' +
+      'if(applied===0)return "ERR|"+(other>0?(audio?"Transition audio : sélectionnez des clips audio":"Transition vidéo : sélectionnez des clips vidéo"):(missed>0?"Clip sélectionné introuvable pour Premiere":"Sélectionnez des clips dans la timeline"));' +
+      'return "OK|"+applied;' +
+      '}catch(e){return "ERR|"+e;}})()'
+    );
+  }
 
   function applyScript(effect) {
     return (
@@ -307,6 +372,7 @@
   var ICON_VIDEO = '<svg class="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.18"/><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5"/></svg>';
   var ICON_AUDIO = '<svg class="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z"/><path d="M16 9a5 5 0 0 1 0 6M19.4 18.4a9 9 0 0 0 0-12.7"/></svg>';
   var ICON_PRESET = '<svg class="w-3.5 h-3.5 text-cream-300 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>';
+  var ICON_TRANSITION = '<svg class="w-3.5 h-3.5 text-emerald-200 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 19 22 5"/></svg>';
   var esc = function (s) {
     return String(s).replace(/[&<>"]/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
@@ -322,7 +388,7 @@
   function compute() {
     var query = input.value;
     var pool = effects.concat(presets).filter(function (e) {
-      return kindFilter === 'all' || e.kind === kindFilter;
+      return kindFilter === 'all' || (kindFilter === 'trans' ? isTransition(e) : e.kind === kindFilter);
     });
     if (!query.trim()) {
       var keys = favorites.concat(recents.filter(function (k) { return favorites.indexOf(k) < 0; }));
@@ -356,7 +422,8 @@
 
   function render() {
     compute();
-    count.textContent = effects.length ? effects.length + ' effets' + (presets.length ? ' · ' + presets.length + ' presets' : '') : '';
+    count.textContent = effects.length ? effects.length + presets.length + ' entrées' : '';
+    count.title = effects.length ? effects.filter(function (e) { return !isTransition(e); }).length + ' effets, ' + effects.filter(isTransition).length + ' transitions, ' + presets.length + ' presets' : '';
     var ci = cursorIndex();
     var html = '';
     if (!results.length) {
@@ -372,9 +439,10 @@
         var fav = favorites.indexOf(keyOf(e)) >= 0, cur = i === ci;
         html +=
           '<div data-i="' + i + '" data-current="' + cur + '" class="row mx-1.5 px-2.5 py-1.5 rounded-lg flex items-center gap-2 cursor-pointer ' + (cur ? 'bg-white/[0.08]' : '') + '">' +
-          (e.kind === 'preset' ? ICON_PRESET : e.kind === 'audio' ? ICON_AUDIO : ICON_VIDEO) +
+          (e.kind === 'preset' ? ICON_PRESET : isTransition(e) ? ICON_TRANSITION : e.kind === 'audio' ? ICON_AUDIO : ICON_VIDEO) +
           '<span class="flex-1 min-w-0 truncate text-[13px] ' + (cur ? 'text-zinc-50' : 'text-zinc-200') + '">' + esc(e.name) +
-          (e.kind === 'preset' ? ' <span class="text-[10px] text-zinc-500">' + esc(e.bin || 'preset') + '</span>' : '') + '</span>' +
+          (e.kind === 'preset' ? ' <span class="text-[10px] text-zinc-500">' + esc(e.bin || 'preset') + '</span>'
+            : isTransition(e) ? ' <span class="text-[10px] text-zinc-500">transition' + (e.kind === 'atrans' ? ' audio' : '') + '</span>' : '') + '</span>' +
           '<button data-star="' + i + '" title="' + (fav ? 'Retirer des favoris (Ctrl+D)' : 'Ajouter aux favoris (Ctrl+D)') + '" class="flex-shrink-0 text-sm leading-none cursor-pointer ' +
           (fav ? 'text-cream-300' : cur ? 'text-zinc-500 hover:text-cream-300' : 'text-transparent') + '">★</button></div>';
       });
@@ -416,7 +484,7 @@
     if (!e || busy) return;
     busy = true;
     setInfo('Application de « ' + e.name + ' »…');
-    (e.kind === 'preset' ? requestPreset(e) : evalScript(applyScript(e))).then(function (r) {
+    (e.kind === 'preset' ? requestPreset(e) : evalScript(isTransition(e) ? transitionScript(e) : applyScript(e))).then(function (r) {
       busy = false;
       if (r.indexOf('OK|') !== 0) {
         setInfo(r.indexOf('ERR|') === 0 ? r.slice(4) : 'Effet non appliqué.', true);
@@ -428,7 +496,8 @@
       write(KEYS.recents, recents);
       // preset : effets absents de ce poste, ou réglages que Premiere n'a pas acceptés
       var note = parts[3] ? ' Effet introuvable : ' + parts[3] + '.' : parseInt(parts[2], 10) > 0 ? ' Certains réglages n’ont pas pu être repris.' : '';
-      setInfo('« ' + e.name + ' » appliqué à ' + n + ' clip' + (n > 1 ? 's' : '') + '.' + note, !!note && !!parts[3]);
+      setInfo(isTransition(e) ? '« ' + e.name + ' » : ' + n + ' transition' + (n > 1 ? 's posées.' : ' posée.')
+        : '« ' + e.name + ' » appliqué à ' + n + ' clip' + (n > 1 ? 's' : '') + '.' + note, !!note && !!parts[3]);
       if (!keepOpen) setTimeout(closeWindow, note ? 1800 : 250);
       else render();
     });
@@ -465,19 +534,24 @@
     cursorKey = null;
     render();
   });
-  document.addEventListener('keydown', function (ev) {
-    var k = ev.key;
+  /** Touche de la console ; rend true si elle a servi */
+  function onKey(k, shift, command) {
     if (k === 'ArrowDown') move(1);
     else if (k === 'ArrowUp') move(-1);
-    else if (k === 'Enter') apply(results[cursorIndex()], ev.shiftKey);
+    else if (k === 'Enter') apply(results[cursorIndex()], shift);
     else if (k === 'Escape') closeWindow();
     else if (k === 'Tab') {
-      kindFilter = kindFilter === 'all' ? 'video' : kindFilter === 'video' ? 'audio' : kindFilter === 'audio' && presets.length ? 'preset' : 'all';
+      kindFilter = kindFilter === 'all' ? 'video' : kindFilter === 'video' ? 'audio' : kindFilter === 'audio' ? 'trans' : kindFilter === 'trans' && presets.length ? 'preset' : 'all';
       cursorKey = null;
       render();
-    } else if ((ev.ctrlKey || ev.metaKey) && k.toLowerCase() === 'd') toggleFavorite(results[cursorIndex()]);
-    else return;
-    ev.preventDefault();
+    } else if (command && k.toLowerCase() === 'd') toggleFavorite(results[cursorIndex()]);
+    else return false;
+    return true;
+  }
+  document.addEventListener('keydown', function (ev) {
+    // déjà traitée : la même touche vient d'être transmise par le script du raccourci (macOS)
+    if (Date.now() - (relayedAt[ev.key] || 0) < 150) return ev.preventDefault();
+    if (onKey(ev.key, ev.shiftKey, ev.ctrlKey || ev.metaKey)) ev.preventDefault();
   });
   list.addEventListener('mousemove', function (ev) {
     var row = ev.target.closest && ev.target.closest('[data-i]');
@@ -514,6 +588,8 @@
       shows++;
       try { sendCepEvent('com.mori.console.ready', 'show'); } catch (e) {}
     }
+    claimKeys();
+    try { if (document.hasFocus()) sendCepEvent('com.mori.console.focus', 'in'); } catch (e) {}
     setInfo('');
     setTimeout(function () {
       input.focus();
@@ -521,6 +597,9 @@
     }, 20);
   };
   window.addEventListener('focus', focus);
+  window.addEventListener('blur', function () {
+    try { sendCepEvent('com.mori.console.focus', 'out'); } catch (e) {}
+  });
   document.addEventListener('visibilitychange', function () {
     if (!document.hidden) focus();
   });
@@ -551,7 +630,7 @@
       var fresh = r.split('\n').map(function (line) {
         var tab = line.indexOf('\t');
         var name = line.slice(tab + 1).trim();
-        var e = { name: name, kind: line.charAt(0) === 'A' ? 'audio' : 'video' };
+        var e = { name: name, kind: KIND_OF[line.charAt(0)] || 'video' };
         return name && !seen[keyOf(e)] && (seen[keyOf(e)] = true) ? e : null;
       }).filter(Boolean);
       if (fresh.length) {

@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="10.0" ExtensionBundleId="com.mori.studio.panel" ExtensionBundleVersion="2.12.3" ExtensionBundleName="Mori" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<ExtensionManifest Version="10.0" ExtensionBundleId="com.mori.studio.panel" ExtensionBundleVersion="2.12.4" ExtensionBundleName="Mori" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ExtensionList>
-    <Extension Id="com.mori.studio.panel" Version="2.12.3" />
-    <Extension Id="com.mori.studio.console" Version="2.12.3" />
-    <Extension Id="com.mori.studio.hotkey" Version="2.12.3" />
+    <Extension Id="com.mori.studio.panel" Version="2.12.4" />
+    <Extension Id="com.mori.studio.console" Version="2.12.4" />
+    <Extension Id="com.mori.studio.hotkey" Version="2.12.4" />
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>

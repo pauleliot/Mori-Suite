@@ -197,6 +197,9 @@
       });
       line('Mise à jour', attempt(function () { var u = JSON.parse(localStorage.getItem('suite.update.mori') || '{}'); return JSON.stringify({ verifiee: u.checkedAt ? new Date(u.checkedAt).toISOString() : null, proposee: u.pending && u.pending.version, reportee: u.snooze }); }));
 
+      section('Console : journal des échanges (préchargement, affichages)');
+      tail(path.join(os.tmpdir(), 'mori-console-trace.log'), 60);
+
       section('Journaux');
       if (mac) {
         var logs = path.join(home, 'Library', 'Logs');

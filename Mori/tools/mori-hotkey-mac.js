@@ -90,6 +90,13 @@ function explain() {
 
 function listen() {
   $.NSEvent.addGlobalMonitorForEventsMatchingMaskHandler($.NSEventMaskKeyDown, function (event) {
+    // flèches haut/bas et Tab : Premiere ne les laisse pas arriver jusqu'à la console, Mori les lui transmet
+    // (il ne le fait que si la console est au premier plan ; répétition de touche comprise)
+    var code = event.keyCode;
+    if (code === 125 || code === 126 || code === 48) {
+      if (!(event.modifierFlags & (OPTION | COMMAND | CONTROL))) say('KEY ' + code);
+      return;
+    }
     if (event.keyCode !== KEY_SPACE || event.isARepeat) return;
     var flags = event.modifierFlags;
     if (!(flags & OPTION) || flags & (COMMAND | CONTROL | SHIFT)) return;

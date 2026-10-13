@@ -28,6 +28,7 @@
   }
   function openConsole() {
     pendingUntil = Date.now() + 4000;
+    lastPress = Date.now();
     requestConsole();
   }
 
@@ -76,8 +77,19 @@
       buffer = lines.pop();
       // « READY » au démarrage, « NOPERM » (macOS) si l'autorisation Accessibilité manque : macOS l'a déjà demandée
       for (var i = 0; i < lines.length; i++) {
-        if (lines[i].trim() !== 'HOTKEY') continue;
+        var text = lines[i].trim();
+        // macOS : flèches et Tab vues par le script du raccourci, transmises à la console quand elle a le clavier
+        if (text.indexOf('KEY ') === 0) {
+          var keyName = MAC_KEYS[text.slice(4)];
+          if (keyName && consoleFocused) {
+            sendCepEvent('com.mori.console.key', keyName);
+            keysSent++;
+          }
+          continue;
+        }
+        if (text !== 'HOTKEY') continue;
         openedAt = Date.now();
+        trace('raccourci pressé');
         openConsole();
       }
     });
@@ -123,6 +135,21 @@
       var t = { background: shared.theme.background, accent: shared.theme.accent, primary: shared.theme.primary };
       try { t.font = window.SuiteTheme.font().id; } catch (e) {}
       sendCepEvent('com.mori.console.theme', JSON.stringify(t));
+    } catch (e) {}
+  }
+
+  // Journal des échanges avec la console (dossier temporaire, repris par le rapport de diagnostic) : dit si le
+  // préchargement a lieu et combien de temps met l'affichage
+  var MAC_KEYS = { '125': 'ArrowDown', '126': 'ArrowUp', '48': 'Tab' };
+  var consoleFocused = false, keysSent = 0, lastPress = 0;
+  var WHO = /hotkey\.html/.test(location.pathname) ? 'cachée ' : 'panneau';
+  function trace(text) {
+    try {
+      var node = window.cep_node;
+      if (!node || typeof node.require !== 'function') return;
+      var fs = node.require('fs'), file = node.require('path').join(node.require('os').tmpdir(), 'mori-console-trace.log');
+      try { if (fs.statSync(file).size > 60000) fs.writeFileSync(file, fs.readFileSync(file, 'utf8').slice(-20000)); } catch (e) {}
+      fs.appendFileSync(file, new Date().toISOString() + '  ' + WHO + '  ' + text + '\n');
     } catch (e) {}
   }
 
@@ -395,6 +422,10 @@
       bridge.addEventListener('com.mori.console.ready', function (ev) {
         var what = '';
         try { what = String((typeof ev === 'string' ? JSON.parse(ev) : ev).data || ''); } catch (e) {}
+        var since = lastPress ? ', ' + (Date.now() - lastPress) + ' ms après le raccourci' : '';
+        trace(what === 'load' ? 'console : page chargée' + (Date.now() < pendingUntil ? since + ' (démarrée par le raccourci)' : ' (préchargement)')
+          : 'console : affichée' + since);
+        if (what !== 'load') { lastPress = 0; consoleFocused = true; }
         // démarrée par le raccourci, encore cachée : une demande l'affiche, la suivante lui donne le clavier
         if (what === 'load' && Date.now() < pendingUntil) {
           requestConsole();
@@ -413,8 +444,17 @@
       };
       bridge.addEventListener('com.mori.console.closed', function () {
         pendingUntil = 0;
+        consoleFocused = false;
+        trace('console : fermée' + (keysSent ? ' (' + keysSent + ' touche(s) transmise(s))' : ''));
+        keysSent = 0;
         prewarm(700);
       });
+      bridge.addEventListener('com.mori.console.focus', function (ev) {
+        var state = '';
+        try { state = String((typeof ev === 'string' ? JSON.parse(ev) : ev).data || ''); } catch (e) {}
+        consoleFocused = state === 'in';
+      });
+      trace('démarrage, premier préchargement dans 5 s');
       prewarm(5000);
       setInterval(function () { prewarm(0); }, 4000);
     }
