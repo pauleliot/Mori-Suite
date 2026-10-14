@@ -206,6 +206,13 @@
         noteKey(name + '*');
         onKey(name, false, false);
       });
+      cep.addEventListener('com.mori.console.hideDone', function (ev) {
+        if (!hideWait) return;
+        clearTimeout(hideWait);
+        hideWait = null;
+        // aucune fenêtre trouvée à masquer : fermeture habituelle
+        if (String(eventData0(ev)) === '0') reallyClose();
+      });
       cep.addEventListener('com.mori.console.cmdResult', function (ev) {
         var data = eventData(ev);
         var wait = data && pendingCmd[data.id];
@@ -478,7 +485,24 @@
     try { sendCepEvent('com.mori.console.closed', ''); } catch (e) {}
   }
   window.addEventListener('beforeunload', announceClosed);
+  // Windows : la fenêtre est masquée par le programme du raccourci au lieu d'être fermée. La fermer arrête son
+  // processus, et le préchargement en relance un : Windows affiche alors le curseur « démarrage en cours ».
+  // Sans réponse du programme (raccourci arrêté), elle est fermée comme avant.
+  var IS_WIN = /Win/i.test(navigator.platform || '');
+  var hideWait = null;
   function closeWindow() {
+    if (IS_WIN && cep && !hideWait) {
+      if (settingsOpen) toggleSettings(false);
+      hideWait = setTimeout(function () {
+        hideWait = null;
+        reallyClose();
+      }, 600);
+      sendCepEvent('com.mori.console.hide', '');
+      return;
+    }
+    reallyClose();
+  }
+  function reallyClose() {
     announceClosed();
     try {
       if (cep) cep.closeExtension();

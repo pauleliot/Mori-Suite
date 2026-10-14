@@ -179,6 +179,11 @@
           }
           continue;
         }
+        if (text.indexOf('HIDDEN ') === 0) {
+          sendCepEvent('com.mori.console.hideDone', text.slice(7));
+          trace('console : masquée (Windows)');
+          continue;
+        }
         if (text !== 'HOTKEY') continue;
         openedAt = Date.now();
         trace('raccourci pressé');
@@ -551,6 +556,11 @@
         trace('console : fermée' + (keysSent ? ' (' + keysSent + ' touche(s) transmise(s))' : ''));
         keysSent = 0;
         prewarm(700);
+      });
+      // Windows : la console demande à être masquée plutôt que fermée (voir mori-hotkey.ps1)
+      bridge.addEventListener('com.mori.console.hide', function () {
+        consoleFocused = false;
+        try { if (child && child.stdin && child.stdin.writable) child.stdin.write('HIDE\n'); } catch (e) {}
       });
       bridge.addEventListener('com.mori.console.focus', function (ev) {
         var state = '';

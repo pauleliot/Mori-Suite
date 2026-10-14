@@ -1,3 +1,6 @@
+2.12.7
+- Mori Console (Windows) : fermer la console la masque au lieu de l'arrêter. Plus de curseur « chargement » à l'ouverture et à la fermeture, et elle réapparaît instantanément. Redémarrez Premiere après la mise à jour.
+
 2.12.6
 - Mori Console : roue crantée en bas à gauche pour changer le raccourci, rechercher et installer les mises à jour, créer un rapport de diagnostic. Redémarrez Premiere après la mise à jour.
 - Mori Console existe aussi seule et gratuite ; installer Mori la remplace en gardant ses favoris.

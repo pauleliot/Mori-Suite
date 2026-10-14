@@ -1,3 +1,7 @@
+1.0.1
+- Windows : fermer la console la masque au lieu de l'arrêter. Plus de curseur « chargement » à l'ouverture et à la fermeture, et elle réapparaît instantanément. Redémarrez Premiere après la mise à jour.
+- La release contient aussi le dossier à copier soi-même dans CEP/extensions, avec son mode d'emploi.
+
 1.0.0
 - Première version de Mori Console seule, gratuite : la console d'effets de Mori (effets, transitions, VST et presets) sans le reste du panneau.
 - Raccourci : Ctrl+Espace (Windows), ⌥Espace (Mac), modifiable dans la roue crantée en bas à gauche.

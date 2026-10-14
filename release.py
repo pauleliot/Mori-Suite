@@ -119,6 +119,39 @@ def console_package(app):
     return {"windows": out, "macos": out}
 
 
+FOLDER_README = """{name} {version} : installation à la main (sans installeur)
+
+1. Fermez Premiere Pro.
+2. Copiez le dossier « {bundle} » dans le dossier des extensions :
+     Windows : %APPDATA%\Adobe\CEP\extensions   (collez ce chemin dans la barre d'adresse de l'Explorateur)
+     macOS   : ~/Library/Application Support/Adobe/CEP/extensions   (Finder > Aller > Aller au dossier…)
+3. Autorisez les extensions non signées, une seule fois par ordinateur :
+     Windows : dans PowerShell
+       foreach ($v in 9..14) {{ $k = "HKCU:\Software\Adobe\CSXS.$v"; if (-not (Test-Path $k)) {{ New-Item $k | Out-Null }}; Set-ItemProperty $k PlayerDebugMode -Value '1' -Type String }}
+     macOS : dans le Terminal
+       for v in 9 10 11 12 13 14; do defaults write com.adobe.CSXS.$v PlayerDebugMode 1; done
+       xattr -dr com.apple.quarantine ~/Library/"Application Support"/Adobe/CEP/extensions/{bundle}
+4. Ouvrez Premiere Pro : {menu} est dans Fenêtre > Extensions.
+L'installeur (Installer-….exe ou Installer-…-macOS.zip) fait tout cela tout seul.
+"""
+
+
+def folder_zip(app, pkg):
+    """Dossier prêt à copier dans CEP/extensions (sans les installeurs), nommé comme le paquet installé, avec un mode d'emploi"""
+    name, v = app["name"], version(app)
+    bundle = manifest(app, r'ExtensionBundleId="([^"]+)"')
+    stage = unpack(pkg, OUT / "stage" / f"{app['id']}-folder")
+    out = OUT / f"{name.replace(' ', '-')}-{v}-dossier.zip"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(stage.rglob("*")):
+            rel = f.relative_to(stage)
+            if f.is_file() and rel.parts[0] != "installer" and not rel.name.startswith("Installer "):
+                z.write(f, f"{bundle}/{rel.as_posix()}")
+        z.writestr("LISEZMOI.txt", FOLDER_README.format(name=name, version=v, bundle=bundle, menu=menu(app)))
+    print(f"{out.name}  ({out.stat().st_size // 1024} Ko)")
+    return out
+
+
 def unpack(zip_path, dest):
     """Contenu du dossier de premier niveau d'un paquet → dest"""
     if dest.exists():
@@ -570,7 +603,9 @@ def publish(app, files):
              f"**Windows** : lancez `Installer-{app['name'].replace(' ', '-')}-{version(app)}.exe` (Premiere Pro fermé). "
              "Si Windows affiche « Windows a protégé votre ordinateur » : Informations complémentaires > Exécuter quand même.\n\n"
              f"**macOS** : dézippez, puis double-cliquez « Installer {app['name']} ». La première fois, macOS bloque une application "
-             "non signée : Réglages Système > Confidentialité et sécurité > Ouvrir quand même.")
+             "non signée : Réglages Système > Confidentialité et sécurité > Ouvrir quand même." +
+             (f"\n\n**À la main** : `{app['name'].replace(' ', '-')}-{version(app)}-dossier.zip` contient le dossier à copier dans "
+              "le dossier des extensions de Premiere (CEP/extensions), avec un mode d'emploi (LISEZMOI.txt)." if app.get("base") else ""))
     subprocess.run([gh(), "release", "create", tag, *map(str, files), "--title", f"{app['name']} {version(app)}", "--notes", notes],
                    cwd=ROOT, check=True)
     print(f"{tag} : publiée")
@@ -585,6 +620,8 @@ def main():
         pk = package(app)
         upd, digest = update_package(app, pk["windows"])
         files = [windows_installer(app, pk["windows"]), mac_installer(app, pk["macos"]), upd]
+        if app.get("base"):  # Mori Console : aussi le dossier à copier soi-même (le paquet de mise à jour reste le dernier)
+            files.insert(2, folder_zip(app, pk["windows"]))
         fresh = publish(app, files) if do_publish else False
         tag = f"{app['id']}-v{version(app)}"
         links += [f"https://github.com/{repo}/releases/download/{tag}/{f.name}" for f in files[:2]]
