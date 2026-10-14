@@ -2890,7 +2890,7 @@ function bundledDenoArgs() {
 
 /** Métadonnées d'un lien (titre, durée, résolutions disponibles), sans rien télécharger */
 export async function fetchOnlineMediaInfo(ytdlp, url) {
-  const res = await runProcess(ytdlp, ['-J', '--no-playlist', '--no-warnings', '--encoding', 'utf-8', ...bundledDenoArgs(), url]);
+  const res = await runProcess(ytdlp, ['-J', '--no-playlist', '--no-warnings', '--encoding', 'utf-8', ...bundledDenoArgs(), '--', url]);
   if (res.code !== 0) {
     const last = res.stderr.trim().split(/\r?\n/).pop() || '';
     throw new Error(last.replace(/^ERROR:\s*/, '') || 'lien illisible');
@@ -2909,7 +2909,7 @@ export async function fetchOnlineMediaInfo(ytdlp, url) {
 /** Recherche YouTube (yt-dlp « ytsearchN: »), sans télécharger : titres, chaînes, durées, miniatures */
 export async function searchYoutube(ytdlp, query, count) {
   const n = Math.max(1, Math.min(50, Math.round(count) || 10));
-  const res = await runProcess(ytdlp, ['-J', '--flat-playlist', '--no-warnings', '--encoding', 'utf-8', ...bundledDenoArgs(), `ytsearch${n}:${query}`]);
+  const res = await runProcess(ytdlp, ['-J', '--flat-playlist', '--no-warnings', '--encoding', 'utf-8', ...bundledDenoArgs(), '--', `ytsearch${n}:${query}`]);
   if (res.code !== 0) {
     const last = res.stderr.trim().split(/\r?\n/).pop() || '';
     throw new Error(last.replace(/^ERROR:\s*/, '') || 'recherche impossible');
@@ -2932,7 +2932,7 @@ export async function searchYoutube(ytdlp, query, count) {
  * adresse web (erreur 153). YouTube sépare presque toujours image et son : deux adresses, parfois une seule.
  */
 export async function fetchPreviewStreams(ytdlp, url) {
-  const res = await runProcess(ytdlp, ['-g', '--no-playlist', '--no-warnings', ...bundledDenoArgs(), '-f', 'bv*[height<=360][ext=mp4]+ba[ext=m4a]/bv*[height<=360]+ba/b[height<=480]/b', url]);
+  const res = await runProcess(ytdlp, ['-g', '--no-playlist', '--no-warnings', ...bundledDenoArgs(), '-f', 'bv*[height<=360][ext=mp4]+ba[ext=m4a]/bv*[height<=360]+ba/b[height<=480]/b', '--', url]);
   const lines = res.stdout.split(/\r?\n/).map(l => l.trim()).filter(l => /^https?:/.test(l));
   if (res.code !== 0 || lines.length === 0) {
     const last = res.stderr.trim().split(/\r?\n/).pop() || '';
@@ -3120,7 +3120,7 @@ export function loadWaveform(ytdlp, ffmpeg, url, duration, onUpdate, onError) {
   let canceled = false;
   let file = '';
   let decoder = null;
-  const run = runYtdlp(ytdlp, ['-f', 'wa[acodec!=none]/ba', '-N', '8', '--no-playlist', '--no-warnings', '--quiet', '--progress', '--newline', '--encoding', 'utf-8', '-P', dir, '-o', `%(id)s-wave-${Date.now()}.%(ext)s`, '--print', 'after_move:MORI_FILE:%(filepath)s', ...bundledDenoArgs(), '--ffmpeg-location', pathMod.dirname(ffmpeg), url], ratio => !canceled && onUpdate(new Float32Array(0), 'download', ratio));
+  const run = runYtdlp(ytdlp, ['-f', 'wa[acodec!=none]/ba', '-N', '8', '--no-playlist', '--no-warnings', '--quiet', '--progress', '--newline', '--encoding', 'utf-8', '-P', dir, '-o', `%(id)s-wave-${Date.now()}.%(ext)s`, '--print', 'after_move:MORI_FILE:%(filepath)s', ...bundledDenoArgs(), '--ffmpeg-location', pathMod.dirname(ffmpeg), '--', url], ratio => !canceled && onUpdate(new Float32Array(0), 'download', ratio));
   run.promise.then(path => {
     file = path;
     if (canceled) return deleteFileQuietly(file);
@@ -3635,7 +3635,7 @@ export function buildYtdlpArgs(url, format, maxHeight, outputDir, ffmpegPath, wa
   } else if (format === 'wav') {
     args.push('-f', 'ba/b', '-x', '--audio-format', 'wav', '--postprocessor-args', `ExtractAudio:-ar ${wav.sampleRate} -c:a ${wavCodec(wav.bitDepth)}`);
   }
-  args.push(url);
+  args.push('--', url);
   return args;
 }
 /** Lance yt-dlp ; progression 0..1 par étape (vidéo puis audio), résout avec le chemin du fichier final */
@@ -11796,7 +11796,7 @@ export default function App() {
 // ==================== components/AboutMori.tsx ====================
 
 /** Version affichée dans « À propos » : à garder alignée sur CSXS/manifest.xml */
-const APP_VERSION = '2.12.4';
+const APP_VERSION = '2.12.5';
 /** Version de Mori Checker (application autonome) : à garder alignée sur checker/package.json */
 const CHECKER_VERSION = '1.2.0';
 

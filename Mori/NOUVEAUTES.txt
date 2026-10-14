@@ -1,3 +1,6 @@
+2.12.5
+- Sécurité : un lien ou une recherche saisi dans le téléchargement en ligne ne peut plus être pris pour une commande par yt-dlp.
+
 2.12.4
 - Mori Console : les transitions vidéo et audio sont proposées (bouton « Transitions » ou Tab). Elles se posent aux deux bouts des clips sélectionnés.
 - Mori Console (Mac) : les flèches et Tab sont transmises à la console par le raccourci. Redémarrez Premiere après la mise à jour.
