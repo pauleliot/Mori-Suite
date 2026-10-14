@@ -1,3 +1,7 @@
+1.0.2
+- Mori Console : Transformation arrive bien en « Échelle uniforme » même quand le clip a déjà d'autres effets (UltraKey par exemple).
+- Rapport de diagnostic : l'état du préchargement de la console est bien lu.
+
 1.0.1
 - Windows : fermer la console la masque au lieu de l'arrêter. Plus de curseur « chargement » à l'ouverture et à la fermeture, et elle réapparaît instantanément. Redémarrez Premiere après la mise à jour.
 - La release contient aussi le dossier à copier soi-même dans CEP/extensions, avec son mode d'emploi.

@@ -130,8 +130,10 @@
       return f + ' ' + attempt(function () { return fs.statSync(path.join(DIR, f)).size + ' o'; }, 'ABSENT');
     }).join(' · '));
     line('Console dans le manifeste', attempt(function () {
-      var m = fs.readFileSync(path.join(DIR, 'CSXS', 'manifest.xml'), 'utf8'), part = m.slice(m.lastIndexOf('com.mori.studio.console'));
-      return 'AutoVisible=' + ((/<AutoVisible>(\w+)</.exec(part) || [])[1] || '?') + ', préchargement ' + (/com\.mori\.console\.prewarm/.test(part) ? 'prévu' : 'absent');
+      // console de Mori (com.mori.studio.console) ou Mori Console seule (com.mori.console.window)
+      var m = fs.readFileSync(path.join(DIR, 'CSXS', 'manifest.xml'), 'utf8');
+      var id = m.indexOf('com.mori.console.window') >= 0 ? 'com.mori.console.window' : 'com.mori.studio.console', part = m.slice(m.lastIndexOf(id));
+      return id + ' : AutoVisible=' + ((/<AutoVisible>(\w+)</.exec(part) || [])[1] || '?') + ', préchargement ' + (/com\.mori\.console(app)?\.prewarm/.test(part) ? 'prévu' : 'absent');
     }));
     line('Outils téléchargés (bin)', attempt(function () { return fs.readdirSync(path.join(DIR, 'bin')).join(', '); }, 'aucun'));
     line('Apparence partagée', attempt(function () {

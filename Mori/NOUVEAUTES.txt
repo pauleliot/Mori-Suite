@@ -1,3 +1,6 @@
+2.12.8
+- Mori Console : Transformation arrive bien en « Échelle uniforme » même quand le clip a déjà d'autres effets (UltraKey par exemple).
+
 2.12.7
 - Mori Console (Windows) : fermer la console la masque au lieu de l'arrêter. Plus de curseur « chargement » à l'ouverture et à la fermeture, et elle réapparaît instantanément. Redémarrez Premiere après la mise à jour.
 

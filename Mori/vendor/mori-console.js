@@ -316,7 +316,12 @@
       // Transformation se retrouve en échelle non uniforme. On remet les réglages d'usine attendus
       // (effet repéré par son identifiant, paramètre par son rang : les noms changent selon la langue).
       'var FIX={"AE.ADBE Geometry":[[2,true]]};' +
-      'function defaults(clip,before){try{var n=clip.components.numItems;if(n<=before)return;var comp=clip.components[n-1],f=FIX[comp.matchName];if(!f)return;' +
+      // l'effet ajouté n'est pas toujours le dernier (Premiere peut le placer avant un effet déjà là, UltraKey par
+      // exemple) : on le retrouve en comparant la liste des effets avant et après
+      'function names(clip){var r=[];for(var i=0;i<clip.components.numItems;i++)r.push(clip.components[i].matchName);return r;}' +
+      'function defaults(clip,before){try{var n=clip.components.numItems;if(n<=before.length)return;var at=n-1;' +
+      'for(var i=0;i<before.length;i++)if(clip.components[i].matchName!==before[i]){at=i;break;}' +
+      'var comp=clip.components[at],f=FIX[comp.matchName];if(!f)return;' +
       'for(var i=0;i<f.length;i++){var pr=comp.properties[f[i][0]];if(pr&&pr.getValue()!==f[i][1])pr.setValue(f[i][1],true);}}catch(e){}}' +
       'function scan(tracks,isAudio,apply){for(var t=0;t<tracks.numTracks;t++){var track=tracks[t],qitems=null,used={};' +
       'for(var c=0;c<track.clips.numItems;c++){var clip=track.clips[c];if(!clip.isSelected())continue;if(!apply){other++;continue;}' +
@@ -324,7 +329,7 @@
       'for(var k=0;k<qt.numItems;k++){var it=qt.getItemAt(k);if(it&&it.type!=="Empty")qitems.push(it);}}' +
       'var it2=qitems[c];if(!it2||(it2.name&&clip.name&&it2.name!==clip.name)){it2=null;' +
       'for(var j=0;j<qitems.length;j++){if(!used[j]&&qitems[j].name===clip.name){it2=qitems[j];used[j]=true;break;}}}else used[c]=true;' +
-      'if(!it2){missed++;continue;}var before=clip.components.numItems;if(isAudio)it2.addAudioEffect(fx);else it2.addVideoEffect(fx);defaults(clip,before);applied++;}}}' +
+      'if(!it2){missed++;continue;}var before=names(clip);if(isAudio)it2.addAudioEffect(fx);else it2.addVideoEffect(fx);defaults(clip,before);applied++;}}}' +
       'scan(seq.videoTracks,false,!audio);scan(seq.audioTracks,true,audio);' +
       'if(applied===0)return "ERR|"+(other>0?(audio?"Les clips sélectionnés sont des clips vidéo : choisissez un effet vidéo ou sélectionnez l\'audio":"Les clips sélectionnés sont des clips audio : choisissez un effet audio ou sélectionnez la vidéo"):(missed>0?"Clip sélectionné introuvable pour Premiere":"Sélectionnez des clips dans la timeline"));' +
       'return "OK|"+applied;' +
