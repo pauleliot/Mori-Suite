@@ -30,7 +30,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / ".release"  # hors du dépôt (.gitignore)
 APPS = [
-    {"id": "mori", "name": "Mori", "dir": "Mori", "tagline": "Le couteau suisse du monteur"},
+    # menu : nom du panneau dans Fenêtre > Extensions à la première installation. Le panneau Mori réécrit ce <Menu>
+    # avec le nom affiché choisi dans ses réglages : la copie de développement porte donc celui de son utilisateur
+    {"id": "mori", "name": "Mori", "dir": "Mori", "tagline": "Le couteau suisse du monteur", "menu": "Mori — Studio"},
     {"id": "ongaku", "name": "Ongaku", "dir": "Ongaku", "tagline": "Bibliothèque musicale et beats"},
     {"id": "sori", "name": "Sori", "dir": "Sori", "tagline": "Courbes d'animation"},
     {"id": "kiru", "name": "Kiru", "dir": "Kiru", "tagline": "Autocut et sous-titres"},
@@ -58,7 +60,7 @@ def version(app):
 
 
 def menu(app):
-    return manifest(app, r"<Menu>([^<]+)</Menu>").strip()
+    return app.get("menu") or manifest(app, r"<Menu>([^<]+)</Menu>").strip()
 
 
 def gh():
@@ -87,8 +89,15 @@ def package(app):
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for f in sorted(d.rglob("*")):
             rel = f.relative_to(d)
-            if f.is_file() and not (set(rel.parts) & MORI_SKIP):
-                z.write(f, f"{app['name']}-{v}/{rel.as_posix()}")
+            if not f.is_file() or set(rel.parts) & MORI_SKIP:
+                continue
+            arc = f"{app['name']}-{v}/{rel.as_posix()}"
+            if rel.as_posix() == "CSXS/manifest.xml" and app.get("menu"):
+                # premier <Menu> (le panneau) : nom par défaut, pas celui de la copie de développement
+                xml = f.read_text(encoding="utf-8")
+                z.writestr(arc, re.sub(r"<Menu>[^<]*</Menu>", f"<Menu>{app['menu']}</Menu>", xml, count=1).encode("utf-8"))
+            else:
+                z.write(f, arc)
     return {"windows": out, "macos": out}
 
 

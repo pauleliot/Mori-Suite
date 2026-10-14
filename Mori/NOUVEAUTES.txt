@@ -1,3 +1,6 @@
+2.12.9
+- Le panneau s'appelle « Mori — Studio » dans Fenêtre > Extensions dès l'installation (le nom choisi dans Apparence le remplace ensuite).
+
 2.12.8
 - Mori Console : Transformation arrive bien en « Échelle uniforme » même quand le clip a déjà d'autres effets (UltraKey par exemple).
 
