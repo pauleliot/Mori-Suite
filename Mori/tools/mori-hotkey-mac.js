@@ -1,4 +1,4 @@
-// Mori Console : raccourci ⌥Espace (Option+Espace) dans Premiere Pro (macOS, JavaScript for Automation)
+// Mori Console : raccourci de la console (⌥Espace par défaut) dans Premiere Pro (macOS, JavaScript for Automation)
 //
 // Lancé (en arrière-plan) par Mori : osascript -l JavaScript mori-hotkey-mac.js
 // Surveille les touches de tout le système et écrit « HOTKEY » sur la sortie standard quand ⌥Espace est pressé alors
@@ -9,7 +9,8 @@
 ObjC.import('Cocoa');
 ObjC.import('ApplicationServices');
 
-var KEY_SPACE = 49;
+// raccourci : code de touche macOS, modificateurs exigés et libellé, passés par Mori (réglages de la console)
+var HOT_KEY = 49, HOT_MASK = 1 << 19, HOT_LABEL = '⌥Espace';
 var OPTION = 1 << 19, COMMAND = 1 << 20, CONTROL = 1 << 18, SHIFT = 1 << 17;
 var HOME = ObjC.unwrap($.NSHomeDirectory());
 var LOG = HOME + '/Library/Logs/Mori-raccourci.log';
@@ -79,7 +80,7 @@ function explain() {
     sa.doShellScript('mkdir -p "' + HOME + '/Library/Application Support/MoriSuite" && touch "' + EXPLAINED + '"');
     sa.activate();
     var r = sa.displayDialog(
-      'Pour que ⌥Espace ouvre Mori Console dans Premiere Pro, macOS doit l\'autoriser :\n\n' +
+      'Pour que ' + HOT_LABEL + ' ouvre Mori Console dans Premiere Pro, macOS doit l\'autoriser :\n\n' +
         'Réglages Système > Confidentialité et sécurité > Accessibilité : activez « Adobe Premiere Pro » ' +
         '(ou « osascript » s\'il apparaît dans la liste).\n\nLe raccourci marche dès que la case est cochée, sans redémarrer.',
       { withTitle: 'Mori Console', buttons: ['Plus tard', 'Ouvrir les réglages'], defaultButton: 'Ouvrir les réglages', withIcon: 'note' }
@@ -97,19 +98,23 @@ function listen() {
       if (!(event.modifierFlags & (OPTION | COMMAND | CONTROL))) say('KEY ' + code);
       return;
     }
-    if (event.keyCode !== KEY_SPACE || event.isARepeat) return;
-    var flags = event.modifierFlags;
-    if (!(flags & OPTION) || flags & (COMMAND | CONTROL | SHIFT)) return;
+    if (event.keyCode !== HOT_KEY || event.isARepeat) return;
+    if ((event.modifierFlags & (OPTION | COMMAND | CONTROL | SHIFT)) !== HOT_MASK) return;
     if (premiereInFront()) {
       say('HOTKEY');
-      log('⌥Espace : console demandée');
-    } else log('⌥Espace hors de Premiere (' + bundleOf($.NSWorkspace.sharedWorkspace.frontmostApplication) + ')');
+      log(HOT_LABEL + ' : console demandée');
+    } else log(HOT_LABEL + ' hors de Premiere (' + bundleOf($.NSWorkspace.sharedWorkspace.frontmostApplication) + ')');
   });
-  log('surveillance de ⌥Espace active');
+  log('surveillance de ' + HOT_LABEL + ' active');
   say('READY');
 }
 
-function run() {
+function run(argv) {
+  if (argv && argv.length >= 2 && +argv[0] >= 0 && +argv[1] > 0) {
+    HOT_KEY = +argv[0];
+    HOT_MASK = +argv[1];
+    HOT_LABEL = argv[2] || HOT_LABEL;
+  }
   var app = $.NSApplication.sharedApplication;
   log('démarrage (macOS ' + ObjC.unwrap($.NSProcessInfo.processInfo.operatingSystemVersionString) + ')');
 

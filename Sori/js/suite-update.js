@@ -2,6 +2,7 @@
  * Suite Mori — mises à jour des panneaux (Mori, Ongaku, Sori, Kiru), copié à l'identique dans chacun.
  *
  * Inclusion : <script src="js/suite-update.js" data-app="kiru" data-name="Kiru"></script>
+ *   data-silent="1" : ni vérification automatique ni bandeau (la console de Mori l'appelle depuis ses réglages)
  *
  *  - À l'ouverture (puis au plus toutes les 6 h), lit https://pauleliot.github.io/updates.json, écrit par release.py :
  *      { "apps": { "kiru": { "version": "1.2.1", "notes": "…", "url": "…/Kiru-1.2.1-update.zip", "sha256": "…" } } }
@@ -161,6 +162,14 @@
     };
   }
 
+  /** Dernière version publiée, sans rien afficher : { current, info (null si à jour), dev } */
+  function latest() {
+    return get(FEED + '?t=' + Date.now()).then(function (txt) {
+      var info = (JSON.parse(txt).apps || {})[APP];
+      return { current: current(), info: info && newer(info.version, current()) ? info : null, dev: isDev() };
+    });
+  }
+
   /** Vérification (force : sans attendre 6 h ni tenir compte de « Plus tard ») */
   function check(force) {
     var s = store();
@@ -178,6 +187,6 @@
     });
   }
 
-  window.SuiteUpdate = { check: check, install: install, offer: offer, newer: newer, current: current };
-  setTimeout(function () { check(false); }, 4000);
+  window.SuiteUpdate = { check: check, latest: latest, install: install, offer: offer, newer: newer, current: current, isDev: isDev };
+  if (!(me.dataset && me.dataset.silent)) setTimeout(function () { check(false); }, 4000);
 })();

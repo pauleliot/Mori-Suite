@@ -1,3 +1,8 @@
+2.12.6
+- Mori Console : roue crantée en bas à gauche pour changer le raccourci, rechercher et installer les mises à jour, créer un rapport de diagnostic. Redémarrez Premiere après la mise à jour.
+- Mori Console existe aussi seule et gratuite ; installer Mori la remplace en gardant ses favoris.
+- Installeur Mac : les outils (FFmpeg, Deno) sont pris en version Apple Silicon sur les Mac M1 à M4.
+
 2.12.5
 - Sécurité : un lien ou une recherche saisi dans le téléchargement en ligne ne peut plus être pris pour une commande par yt-dlp.
 

@@ -12,10 +12,95 @@
 (function () {
   'use strict';
   if (window.MoriHotkey) return;
-  var CONSOLE_ID = 'com.mori.studio.console';
+  // Même script pour Mori et pour Mori Console seule (paquet « com.mori.console ») : identifiants selon le paquet
+  var ID = (function () { try { return window.__adobe_cep__.getExtensionId(); } catch (e) { return ''; } })();
+  var STANDALONE = ID.indexOf('com.mori.console.') === 0;
+  var CONSOLE_ID = STANDALONE ? 'com.mori.console.window' : 'com.mori.studio.console';
+  var PREWARM_EVENT = STANDALONE ? 'com.mori.consoleapp.prewarm' : 'com.mori.console.prewarm';
+  // fenêtre cachée (hotkey.html) : la seule à répondre aux réglages de la console (le panneau Mori charge aussi ce script)
+  var HIDDEN = /hotkey\.html$/.test(location.pathname);
   var child = null;
   var stopped = false;
   var retry = null;
+
+  function nodeMods() {
+    var node = window.cep_node;
+    if (!node || typeof node.require !== 'function') return null;
+    return { fs: node.require('fs'), path: node.require('path'), proc: node.process };
+  }
+  var IS_MAC = (function () { var n = nodeMods(); return n ? n.proc.platform === 'darwin' : /Mac/i.test(navigator.platform); })();
+
+  // ---------- Raccourci choisi dans les réglages de la console (MoriSuite/console.json) ----------
+  // code : touche physique (KeyboardEvent.code, pour macOS) ; vk : touche Windows (keyCode du navigateur)
+  var DEFAULT_HOTKEY = IS_MAC
+    ? { code: 'Space', vk: 32, label: 'Espace', ctrl: false, alt: true, shift: false, meta: false }
+    : { code: 'Space', vk: 32, label: 'Espace', ctrl: true, alt: false, shift: false, meta: false };
+  // codes de touches macOS des touches acceptées
+  var MAC_CODES = {
+    KeyA: 0, KeyS: 1, KeyD: 2, KeyF: 3, KeyH: 4, KeyG: 5, KeyZ: 6, KeyX: 7, KeyC: 8, KeyV: 9, KeyB: 11, KeyQ: 12, KeyW: 13,
+    KeyE: 14, KeyR: 15, KeyY: 16, KeyT: 17, Digit1: 18, Digit2: 19, Digit3: 20, Digit4: 21, Digit6: 22, Digit5: 23, Digit9: 25,
+    Digit7: 26, Digit8: 28, Digit0: 29, KeyO: 31, KeyU: 32, KeyI: 34, KeyP: 35, KeyL: 37, KeyJ: 38, KeyK: 40, KeyN: 45, KeyM: 46,
+    Space: 49, F1: 122, F2: 120, F3: 99, F4: 118, F5: 96, F6: 97, F7: 98, F8: 100, F9: 101, F10: 109, F11: 103, F12: 111
+  };
+  function suiteDir() {
+    var n = nodeMods();
+    if (!n) return '';
+    var env = n.proc.env || {};
+    return IS_MAC ? n.path.join(env.HOME || '', 'Library', 'Application Support', 'MoriSuite')
+      : n.path.join(env.APPDATA || n.path.join(env.USERPROFILE || '', 'AppData', 'Roaming'), 'MoriSuite');
+  }
+  /** Raccourci valable : une touche connue, avec Ctrl, Alt/⌥ ou ⌘ (les touches F1 à F12 peuvent être seules) */
+  function validHotkey(h) {
+    if (!h || typeof h.code !== 'string' || !(h.code in MAC_CODES) || !(h.vk > 0 && h.vk < 256)) return false;
+    return !!(h.ctrl || h.alt || h.meta) || /^F\d+$/.test(h.code);
+  }
+  function readHotkey() {
+    try {
+      var n = nodeMods(), cfg = JSON.parse(n.fs.readFileSync(n.path.join(suiteDir(), 'console.json'), 'utf8'));
+      if (validHotkey(cfg.hotkey)) return cfg.hotkey;
+    } catch (e) {}
+    return DEFAULT_HOTKEY;
+  }
+  function writeHotkey(h) {
+    var n = nodeMods(), dir = suiteDir(), file = n.path.join(dir, 'console.json'), cfg = {};
+    try { cfg = JSON.parse(n.fs.readFileSync(file, 'utf8')) || {}; } catch (e) {}
+    cfg.hotkey = h;
+    n.fs.mkdirSync(dir, { recursive: true });
+    n.fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
+  }
+  function hotkeyLabel(h) {
+    var parts = IS_MAC
+      ? [h.ctrl ? '⌃' : '', h.alt ? '⌥' : '', h.shift ? '⇧' : '', h.meta ? '⌘' : ''].join('')
+      : [h.ctrl ? 'Ctrl+' : '', h.alt ? 'Alt+' : '', h.shift ? 'Maj+' : '', h.meta ? 'Win+' : ''].join('');
+    return parts + (h.label || h.code);
+  }
+
+  // ---------- Mori Console seule : s'efface quand Mori (qui contient la console) est installé ----------
+  function extensionRoots() {
+    var n = nodeMods();
+    if (!n) return [];
+    var roots = [n.path.dirname(extensionDir())];
+    if (IS_MAC) roots.push('/Library/Application Support/Adobe/CEP/extensions');
+    else roots.push('C:\\Program Files (x86)\\Common Files\\Adobe\\CEP\\extensions', 'C:\\Program Files\\Common Files\\Adobe\\CEP\\extensions');
+    return roots;
+  }
+  /** Dossiers d'extensions dont le manifeste porte ce paquet */
+  function bundleDirs(bundleId) {
+    var n = nodeMods(), found = [];
+    if (!n) return found;
+    extensionRoots().forEach(function (root) {
+      var names = [];
+      try { names = n.fs.readdirSync(root); } catch (e) { return; }
+      names.forEach(function (name) {
+        try {
+          var m = n.fs.readFileSync(n.path.join(root, name, 'CSXS', 'manifest.xml'), 'utf8');
+          if (m.indexOf('ExtensionBundleId="' + bundleId + '"') >= 0) found.push(n.path.join(root, name));
+        } catch (e) {}
+      });
+    });
+    return found;
+  }
+  var YIELDED = STANDALONE && bundleDirs('com.mori.studio.panel').length > 0;
 
   // La console est préchargée sans s'afficher (voir plus bas) : la demande l'affiche aussitôt. Si elle n'était pas
   // chargée, la demande la démarre mais elle reste cachée : on redemande dès que sa page se dit chargée.
@@ -40,7 +125,8 @@
   function start() {
     var node = window.cep_node;
     stopped = false;
-    if (child || !node || typeof node.require !== 'function') return false;
+    if (YIELDED || child || !node || typeof node.require !== 'function') return false;
+    var hk = readHotkey();
     var proc = node.process;
     if (!proc || (proc.platform !== 'win32' && proc.platform !== 'darwin')) return false;
     var path = node.require('path');
@@ -49,7 +135,10 @@
       if (proc.platform === 'win32') {
         // une seule instance tient le raccourci : les suivantes attendent (mutex dans le script)
         var ps1 = path.join(extensionDir(), 'tools', 'mori-hotkey.ps1');
-        child = cp.spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ps1], {
+        // touches Windows : Alt 1, Ctrl 2, Maj 4, Win 8
+        var mods = (hk.alt ? 1 : 0) | (hk.ctrl ? 2 : 0) | (hk.shift ? 4 : 0) | (hk.meta ? 8 : 0);
+        child = cp.spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ps1,
+          '-Vk', String(hk.vk), '-Mods', String(mods)], {
           windowsHide: true,
           stdio: ['pipe', 'pipe', 'ignore'],
         });
@@ -63,7 +152,10 @@
           return false;
         }
         var jxa = path.join(extensionDir(), 'tools', 'mori-hotkey-mac.js');
-        child = cp.spawn('/usr/bin/osascript', ['-l', 'JavaScript', jxa], { stdio: ['pipe', 'pipe', 'ignore'] });
+        // touches macOS : ⌃ 1<<18, ⌥ 1<<19, ⇧ 1<<17, ⌘ 1<<20
+        var mask = (hk.ctrl ? 1 << 18 : 0) | (hk.alt ? 1 << 19 : 0) | (hk.shift ? 1 << 17 : 0) | (hk.meta ? 1 << 20 : 0);
+        child = cp.spawn('/usr/bin/osascript', ['-l', 'JavaScript', jxa, String(MAC_CODES[hk.code]), String(mask), hotkeyLabel(hk)],
+          { stdio: ['pipe', 'pipe', 'ignore'] });
       }
     } catch (e) {
       child = null;
@@ -93,7 +185,9 @@
         openConsole();
       }
     });
+    var mine = child;
     var again = function () {
+      if (child !== mine) return; // processus déjà remplacé (raccourci modifié)
       child = null;
       if (stopped) return;
       // une autre instance tient peut-être déjà le raccourci (mutex) : on réessaie, au cas où elle s'arrêterait
@@ -112,6 +206,13 @@
       try { child.kill(); } catch (e) {}
       child = null;
     }
+  }
+  /** Raccourci modifié : le programme qui le surveille est relancé avec la nouvelle touche */
+  function restart() {
+    var had = !!child;
+    stop();
+    // macOS : une seule instance du script ; on laisse l'ancienne se terminer avant de relancer
+    setTimeout(function () { if (had || HIDDEN) start(); }, 800);
   }
 
   // La console tourne sans Node (ouverture plus rapide) : elle demande le thème partagé au démarrage, la fenêtre
@@ -418,7 +519,9 @@
 
   try {
     var bridge = window.__adobe_cep__;
-    if (bridge && bridge.addEventListener) {
+    if (YIELDED) trace('Mori est installé : Mori Console seule reste inactive (Mori contient la console)');
+    if (bridge && bridge.addEventListener && !YIELDED) {
+      bridge.addEventListener('com.mori.console.cmd', onCommand);
       bridge.addEventListener('com.mori.console.ready', function (ev) {
         var what = '';
         try { what = String((typeof ev === 'string' ? JSON.parse(ev) : ev).data || ''); } catch (e) {}
@@ -440,7 +543,7 @@
       // sur cet événement) : au démarrage de Premiere, après chaque fermeture, puis régulièrement, car la fermeture
       // par la croix ne prévient pas. Sans effet quand la console est déjà chargée ou affichée.
       var prewarm = function (delay) {
-        setTimeout(function () { sendCepEvent('com.mori.console.prewarm', ''); }, delay);
+        setTimeout(function () { sendCepEvent(PREWARM_EVENT, ''); }, delay);
       };
       bridge.addEventListener('com.mori.console.closed', function () {
         pendingUntil = 0;
@@ -457,9 +560,87 @@
       trace('démarrage, premier préchargement dans 5 s');
       prewarm(5000);
       setInterval(function () { prewarm(0); }, 4000);
+      if (HIDDEN && !STANDALONE) setTimeout(removeStandalone, 8000);
     }
   } catch (e) {}
 
+  // ==================== Réglages de la console (roue crantée) ====================
+  // La console n'a pas Node : elle demande ici le raccourci, la recherche et l'installation des mises à jour et le
+  // rapport de diagnostic. Réponse : « com.mori.console.cmdResult » { id, ok, … }.
+  var updateInfo = null;
+  function reply(id, data) {
+    data.id = id;
+    sendCepEvent('com.mori.console.cmdResult', JSON.stringify(data));
+  }
+  function appName() { return STANDALONE ? 'Mori Console' : 'Mori'; }
+  function onCommand(ev) {
+    var req = null;
+    try { req = eventData(ev); } catch (e) {}
+    if (!req || !req.action) return;
+    // nouveau raccourci : toutes les fenêtres relancent leur surveillance ; la fenêtre cachée l'enregistre et répond
+    if (req.action === 'setHotkey') {
+      var h = req.hotkey === 'default' ? DEFAULT_HOTKEY : req.hotkey;
+      if (!validHotkey(h)) return HIDDEN && reply(req.id, { ok: false, error: 'Raccourci refusé : ajoutez Ctrl, Alt ou ⌘ (ou choisissez F1 à F12)' });
+      if (HIDDEN) {
+        try { writeHotkey(h); } catch (e) { return reply(req.id, { ok: false, error: 'Enregistrement impossible : ' + e.message }); }
+        trace('raccourci modifié : ' + hotkeyLabel(h));
+      }
+      setTimeout(restart, HIDDEN ? 0 : 150);
+      if (HIDDEN) reply(req.id, { ok: true, label: hotkeyLabel(h) });
+      return;
+    }
+    if (!HIDDEN) return;
+    var U = window.SuiteUpdate;
+    if (req.action === 'getConfig') {
+      var hk = readHotkey();
+      return reply(req.id, { ok: true, label: hotkeyLabel(hk), isDefault: hotkeyLabel(hk) === hotkeyLabel(DEFAULT_HOTKEY), mac: IS_MAC,
+        app: appName(), version: U ? U.current() : '', dev: U ? U.isDev() : false });
+    }
+    if (req.action === 'checkUpdate') {
+      if (!U) return reply(req.id, { ok: false, error: 'Mises à jour indisponibles : redémarrez Premiere Pro' });
+      return U.latest().then(function (r) {
+        updateInfo = r.info;
+        reply(req.id, { ok: true, current: r.current, version: r.info ? r.info.version : '', notes: r.info ? r.info.notes || '' : '', dev: r.dev });
+      }, function (e) { reply(req.id, { ok: false, error: 'Vérification impossible (' + (e.message || e) + ')' }); });
+    }
+    if (req.action === 'installUpdate') {
+      if (!U || !updateInfo) return reply(req.id, { ok: false, error: 'Recherchez d\'abord la mise à jour' });
+      if (U.isDev()) return reply(req.id, { ok: false, error: 'Copie de développement : pas d\'installation automatique' });
+      var step = function (m) { sendCepEvent('com.mori.console.cmdProgress', JSON.stringify({ id: req.id, text: m })); };
+      return U.install(updateInfo, extensionDir(), step).then(function (v) {
+        trace(appName() + ' ' + v + ' installé depuis la console');
+        reply(req.id, { ok: true, version: v });
+      }, function (e) { reply(req.id, { ok: false, error: String(e.message || e) }); });
+    }
+    if (req.action === 'diagnostic') {
+      if (!window.MoriDiagnostic) return reply(req.id, { ok: false, error: 'Rapport indisponible : redémarrez Premiere Pro' });
+      return window.MoriDiagnostic.run().then(function (r) { reply(req.id, { ok: true, file: r.file }); },
+        function (e) { reply(req.id, { ok: false, error: String(e.message || e) }); });
+    }
+  }
+  function eventData(ev) {
+    var d = typeof ev === 'string' ? JSON.parse(ev) : ev;
+    if (d && d.data !== undefined) d = d.data;
+    return typeof d === 'string' ? JSON.parse(d) : d;
+  }
+
+  /** Mori installé : Mori Console seule n'a plus lieu d'être (deux consoles) ; ses dossiers sont retirés */
+  function removeStandalone() {
+    var n = nodeMods();
+    if (!n) return;
+    bundleDirs('com.mori.console').forEach(function (dir) {
+      if (n.fs.existsSync(n.path.join(dir, '.debug'))) return; // copie de développement : on n'y touche pas
+      try {
+        // (l'installeur de Mori, lui, la désinstalle proprement ; ici, depuis Premiere, seuls ses fichiers sont retirés)
+        n.fs.rmSync(dir, { recursive: true, force: true });
+        trace('Mori Console seule retirée (' + dir + ') : Mori contient la console');
+      } catch (e) {
+        trace('Mori Console seule : retrait impossible (' + e.message + ')');
+      }
+    });
+  }
+
   window.addEventListener('unload', stop);
-  window.MoriHotkey = { start: start, stop: stop, openConsole: openConsole, sendTheme: sendTheme, parsePresets: parsePresets, presetScript: presetScript };
+  window.MoriHotkey = { start: start, stop: stop, openConsole: openConsole, sendTheme: sendTheme, parsePresets: parsePresets, presetScript: presetScript,
+    hotkeyLabel: hotkeyLabel, validHotkey: validHotkey, standalone: STANDALONE, yielded: YIELDED };
 })();

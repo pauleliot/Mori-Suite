@@ -1,0 +1,5 @@
+1.0.0
+- Première version de Mori Console seule, gratuite : la console d'effets de Mori (effets, transitions, VST et presets) sans le reste du panneau.
+- Raccourci : Ctrl+Espace (Windows), ⌥Espace (Mac), modifiable dans la roue crantée en bas à gauche.
+- Roue crantée : raccourci, mises à jour, rapport de diagnostic.
+- Installer Mori plus tard remplace Mori Console : favoris et récents sont repris.

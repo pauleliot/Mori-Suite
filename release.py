@@ -34,11 +34,18 @@ APPS = [
     {"id": "ongaku", "name": "Ongaku", "dir": "Ongaku", "tagline": "Bibliothèque musicale et beats"},
     {"id": "sori", "name": "Sori", "dir": "Sori", "tagline": "Courbes d'animation"},
     {"id": "kiru", "name": "Kiru", "dir": "Kiru", "tagline": "Autocut et sous-titres"},
+    # Mori Console seule (gratuite) : fichiers de la console de Mori + manifeste et installeurs de console-standalone/
+    {"id": "mori-console", "name": "Mori Console", "dir": "Mori/console-standalone", "base": "Mori",
+     "tagline": "La console d'effets de Mori, gratuite"},
 ]
 PUBLISHER = "Paul-Eliot Kostre"
 SITE = "https://pauleliot.github.io/plugins.html"
 # Mori n'a pas de build.py : son paquet est le dossier lui-même, sans ces fichiers
-MORI_SKIP = {".debug", "dist", "app.source.tsx", ".claude"}
+MORI_SKIP = {".debug", "dist", "app.source.tsx", ".claude", "console-standalone"}
+# Mori Console seule : fichiers repris de Mori (la console, sa fenêtre cachée et ce qu'elles chargent)
+CONSOLE_FILES = ["console.html", "hotkey.html", "CSInterface.js", "assets/logo.png", "tools/mori-hotkey.ps1", "tools/mori-hotkey-mac.js",
+                 "vendor/mori-console.js", "vendor/mori-hotkey.js", "vendor/mori-diagnostic.js", "vendor/suite-theme.js",
+                 "vendor/suite-update.js", "vendor/mori.css", "vendor/fonts"]
 
 
 def manifest(app, attr):
@@ -70,6 +77,8 @@ def iscc():
 def package(app):
     """Paquets d'un panneau (.zip) → { 'windows': chemin, 'macos': chemin } (Mori : le même pour les deux)"""
     d, v = ROOT / app["dir"], version(app)
+    if app.get("base"):
+        return console_package(app)
     if (d / "build.py").exists():
         subprocess.run([sys.executable, "build.py"], cwd=d, check=True)
         return {"windows": d / "dist" / f"{app['name']}-{v}-Windows.zip", "macos": d / "dist" / f"{app['name']}-{v}-macOS.zip"}
@@ -80,6 +89,33 @@ def package(app):
             rel = f.relative_to(d)
             if f.is_file() and not (set(rel.parts) & MORI_SKIP):
                 z.write(f, f"{app['name']}-{v}/{rel.as_posix()}")
+    return {"windows": out, "macos": out}
+
+
+def console_package(app):
+    """Mori Console seule : les fichiers de la console de Mori, plus le manifeste, les installeurs et les nouveautés
+    de console-standalone/ ; la fenêtre cachée y cherche les mises à jour de « mori-console »"""
+    base, own, v = ROOT / app["base"], ROOT / app["dir"], version(app)
+    out = own / "dist" / f"{app['name'].replace(' ', '-')}-{v}.zip"
+    out.parent.mkdir(exist_ok=True)
+    top = f"{app['name'].replace(' ', '-')}-{v}"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for rel in CONSOLE_FILES:
+            src = base / rel
+            files = sorted(p for p in src.rglob("*") if p.is_file()) if src.is_dir() else [src]
+            for f in files:
+                arc = f.relative_to(base).as_posix()
+                data = f.read_bytes()
+                if arc == "hotkey.html":
+                    old = b'data-app="mori" data-name="Mori"'
+                    if old not in data:
+                        sys.exit("hotkey.html : attribut data-app de suite-update.js introuvable")
+                    data = data.replace(old, b'data-app="mori-console" data-name="Mori Console"')
+                z.writestr(f"{top}/{arc}", data)
+        for f in sorted(own.rglob("*")):
+            rel = f.relative_to(own)
+            if f.is_file() and "dist" not in rel.parts:
+                z.write(f, f"{top}/{rel.as_posix()}")
     return {"windows": out, "macos": out}
 
 
@@ -101,7 +137,7 @@ def unpack(zip_path, dest):
 # ==================== Icône (logo sur le carré crème des panneaux) ====================
 def icon(app, size=512):
     from PIL import Image, ImageDraw
-    logo = Image.open(ROOT / app["dir"] / "assets/logo.png").convert("RGBA")
+    logo = Image.open(ROOT / app.get("base", app["dir"]) / "assets/logo.png").convert("RGBA")
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     ImageDraw.Draw(img).rounded_rectangle([0, 0, size - 1, size - 1], radius=size // 5, fill=(251, 230, 166, 255))
     s = int(size * 0.72)
@@ -127,7 +163,7 @@ DisableProgramGroupPage=yes
 DisableReadyPage=yes
 PrivilegesRequired=lowest
 OutputDir={outdir}
-OutputBaseFilename=Installer-{name}-{version}
+OutputBaseFilename=Installer-{fname}-{version}
 SetupIconFile={ico}
 UninstallDisplayIcon={{app}}\installer\icon.ico
 UninstallDisplayName={name} pour Premiere Pro
@@ -201,12 +237,12 @@ def windows_installer(app, pkg):
     # d'une version à l'autre — Mori remplace ainsi l'entrée de son ancien nom dans « Applications installées »
     # au lieu d'en ajouter une seconde (UsePreviousAppDir=no : il s'installe bien dans son nouveau dossier)
     seed = {"mori": "cypher"}.get(app["id"], app["id"])
-    iss = ISS.format(name=name, version=v, guid=str(uuid.uuid5(uuid.NAMESPACE_URL, f"cypher-suite/{seed}")).upper(),
+    iss = ISS.format(name=name, fname=name.replace(" ", "-"), version=v, guid=str(uuid.uuid5(uuid.NAMESPACE_URL, f"cypher-suite/{seed}")).upper(),
                      publisher=PUBLISHER, site=SITE, bundle=bundle, outdir=OUT, ico=ico, stage=stage, menu=menu(app), status=status)
     iss_path = OUT / "stage" / f"{app['id']}.iss"
     iss_path.write_text(iss, encoding="utf-8-sig")
     subprocess.run([iscc(), "/Q", str(iss_path)], check=True)
-    out = OUT / f"Installer-{name}-{v}.exe"
+    out = OUT / f"Installer-{name.replace(' ', '-')}-{v}.exe"
     print(f"{out.name}  ({out.stat().st_size // 1024} Ko)")
     return out
 
@@ -426,7 +462,7 @@ def mac_installer(app, pkg):
         sys.exit(f"{name} : « Installer {name}.command » absent du paquet macOS")
     icns = OUT / "stage" / f"{app['id']}.icns"
     icon(app, 1024).save(icns)
-    out = OUT / f"Installer-{name}-{v}-macOS.zip"
+    out = OUT / f"Installer-{name.replace(' ', '-')}-{v}-macOS.zip"
     top = f"Installer {name}.app/Contents"
 
     def add(z, arc, data, mode):
@@ -460,12 +496,12 @@ def update_package(app, pkg):
     import hashlib
     name, v = app["name"], version(app)
     stage = unpack(pkg, OUT / "stage" / f"{app['id']}-upd")
-    out = OUT / f"{name}-{v}-update.zip"
+    out = OUT / f"{name.replace(' ', '-')}-{v}-update.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for f in sorted(stage.rglob("*")):
             rel = f.relative_to(stage)
             if f.is_file() and not (rel.name.startswith("Installer ") or rel.name == "LISEZMOI.txt"):
-                z.write(f, f"{name}-{v}/{rel.as_posix()}")
+                z.write(f, f"{name.replace(' ', '-')}-{v}/{rel.as_posix()}")
     return out, hashlib.sha256(out.read_bytes()).hexdigest()
 
 
@@ -531,7 +567,7 @@ def publish(app, files):
     news = notes_for(app)
     notes = (f"{app['name']} {version(app)} — {app['tagline']}.\n\n" + (f"**Nouveautés**\n{news}\n\n" if news else "") +
              "Déjà installé ? Le panneau propose la mise à jour tout seul (bandeau « Mettre à jour »).\n\n"
-             f"**Windows** : lancez `Installer-{app['name']}-{version(app)}.exe` (Premiere Pro fermé). "
+             f"**Windows** : lancez `Installer-{app['name'].replace(' ', '-')}-{version(app)}.exe` (Premiere Pro fermé). "
              "Si Windows affiche « Windows a protégé votre ordinateur » : Informations complémentaires > Exécuter quand même.\n\n"
              f"**macOS** : dézippez, puis double-cliquez « Installer {app['name']} ». La première fois, macOS bloque une application "
              "non signée : Réglages Système > Confidentialité et sécurité > Ouvrir quand même.")

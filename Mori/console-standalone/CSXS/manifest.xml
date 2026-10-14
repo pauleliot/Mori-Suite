@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Mori Console seule (gratuite) : paquet fabriqué par release.py à partir des fichiers de la console de Mori.
+     S'efface d'elle-même quand Mori, qui contient la console, est installé (voir mori-hotkey.js). -->
+<ExtensionManifest Version="10.0" ExtensionBundleId="com.mori.console" ExtensionBundleVersion="1.0.0" ExtensionBundleName="Mori Console" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <ExtensionList>
+    <Extension Id="com.mori.console.window" Version="1.0.0" />
+    <Extension Id="com.mori.console.hotkey" Version="1.0.0" />
+  </ExtensionList>
+  <ExecutionEnvironment>
+    <HostList>
+      <Host Name="PPRO" Version="[14.0,99.9]" />
+    </HostList>
+    <LocaleList>
+      <Locale Code="All" />
+    </LocaleList>
+    <RequiredRuntimeList>
+      <RequiredRuntime Name="CSXS" Version="10.0" />
+    </RequiredRuntimeList>
+  </ExecutionEnvironment>
+  <DispatchInfoList>
+    <Extension Id="com.mori.console.window">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./console.html</MainPath>
+        </Resources>
+        <!-- préchargée sans s'afficher (événement envoyé par mori-hotkey.js), montrée par le raccourci ou le menu -->
+        <Lifecycle>
+          <AutoVisible>false</AutoVisible>
+          <StartOn>
+            <Event>com.mori.consoleapp.prewarm</Event>
+          </StartOn>
+        </Lifecycle>
+        <UI>
+          <Type>Modeless</Type>
+          <Menu>Mori Console</Menu>
+          <Geometry>
+            <Size>
+              <Height>300</Height>
+              <Width>420</Width>
+            </Size>
+            <MinSize>
+              <Height>200</Height>
+              <Width>320</Width>
+            </MinSize>
+          </Geometry>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+    <!-- Fenêtre invisible démarrée avec Premiere : raccourci, presets, préchargement, réglages de la console -->
+    <Extension Id="com.mori.console.hotkey">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./hotkey.html</MainPath>
+          <CEFCommandLine>
+            <Parameter>--enable-nodejs</Parameter>
+            <Parameter>--allow-file-access</Parameter>
+          </CEFCommandLine>
+        </Resources>
+        <Lifecycle>
+          <AutoVisible>false</AutoVisible>
+          <StartOn>
+            <Event>com.adobe.csxs.events.ApplicationActivate</Event>
+            <Event>applicationActivate</Event>
+          </StartOn>
+        </Lifecycle>
+        <UI>
+          <Type>Custom</Type>
+          <Geometry>
+            <Size>
+              <Height>1</Height>
+              <Width>1</Width>
+            </Size>
+          </Geometry>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+  </DispatchInfoList>
+</ExtensionManifest>

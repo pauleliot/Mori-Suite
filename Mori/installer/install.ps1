@@ -135,6 +135,26 @@ try {
       }
     }
   }
+  # Mori Console seule (gratuite, paquet com.mori.console) : remplacée par la console incluse dans Mori ;
+  # favoris, récents et presets de la console repris, puis désinstallée
+  if (Test-Path $cepCache) {
+    Get-ChildItem -Path $cepCache -Directory | Where-Object { $_.Name -like '*_com.mori.console.window' } | ForEach-Object {
+      $newCache = Join-Path $cepCache ($_.Name -replace 'com\.mori\.console\.window$', 'com.mori.studio.console')
+      $oldStorage = Join-Path $_.FullName 'Local Storage'
+      if ((Test-Path $oldStorage) -and -not (Test-Path (Join-Path $newCache 'Local Storage'))) {
+        New-Item -ItemType Directory -Force -Path $newCache | Out-Null
+        Copy-Item -Recurse -Force $oldStorage $newCache
+        Ok 'favoris de Mori Console repris'
+      }
+    }
+  }
+  $Standalone = Join-Path $env:APPDATA 'Adobe\CEP\extensions\com.mori.console'
+  if (Test-Path $Standalone) {
+    $unins = Get-ChildItem -Path $Standalone -Filter 'unins*.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($unins) { Start-Process -FilePath $unins.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -ErrorAction SilentlyContinue }
+    if (Test-Path $Standalone) { Remove-Item -Recurse -Force $Standalone -ErrorAction SilentlyContinue }
+    Ok 'Mori Console seule remplacée par la console de Mori'
+  }
   New-Item -ItemType Directory -Force -Path $Bin, $Temp | Out-Null
 
   # 3. FFmpeg + ffprobe

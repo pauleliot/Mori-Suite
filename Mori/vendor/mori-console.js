@@ -10,6 +10,8 @@
  *
  * Clavier : ↑ ↓ choisir · Entrée appliquer et fermer · Maj+Entrée appliquer sans fermer · Tab Tout/Vidéo/Audio/Presets ·
  * Ctrl+D (⌘D) favori · Échap fermer. Champ vide : favoris puis derniers effets utilisés.
+ * Roue crantée (en bas à gauche) : changer le raccourci, rechercher et installer les mises à jour, rapport de diagnostic
+ * (la fenêtre cachée de Mori, qui a Node, s'en charge : événements « com.mori.console.cmd »).
  */
 (function () {
   'use strict';
@@ -157,7 +159,7 @@
     noteKey(ev.key);
   }, true);
   var presets = read('mori.console.presets', []);
-  var presetSource = '', pendingPreset = null, started = false;
+  var presetSource = '', pendingPreset = null, started = false, pendingCmd = {};
   // la console n'a pas Node : le thème vient de la fenêtre cachée de Mori (événement CEP), et le dernier reçu est
   // gardé pour s'afficher tout de suite aux couleurs du thème à l'ouverture suivante
   applyTheme(read('mori.console.theme', null));
@@ -203,6 +205,16 @@
         relayedAt[name] = Date.now();
         noteKey(name + '*');
         onKey(name, false, false);
+      });
+      cep.addEventListener('com.mori.console.cmdResult', function (ev) {
+        var data = eventData(ev);
+        var wait = data && pendingCmd[data.id];
+        if (wait) wait.done(data);
+      });
+      cep.addEventListener('com.mori.console.cmdProgress', function (ev) {
+        var data = eventData(ev);
+        var wait = data && pendingCmd[data.id];
+        if (wait && wait.progress) wait.progress(String(data.text || ''));
       });
       cep.addEventListener('com.mori.console.presetResult', function (ev) {
         var data = eventData(ev);
@@ -422,6 +434,7 @@
 
   function render() {
     compute();
+    if (settingsOpen) return renderSettings();
     count.textContent = effects.length ? effects.length + presets.length + ' entrées' : '';
     count.title = effects.length ? effects.filter(function (e) { return !isTransition(e); }).length + ' effets, ' + effects.filter(isTransition).length + ' transitions, ' + presets.length + ' presets' : '';
     var ci = cursorIndex();
@@ -532,7 +545,183 @@
 
   input.addEventListener('input', function () {
     cursorKey = null;
+    if (settingsOpen) settingsOpen = false;
     render();
+  });
+
+  // ---------- réglages (roue crantée) ----------
+  var settingsOpen = false, capturing = false, conf = null;
+  var keyMsg = '', upd = { state: 'idle' }, diag = { state: 'idle' };
+  var PILL = 'px-2.5 py-1 rounded-full bg-white/[0.06] hover:bg-white/[0.12] text-zinc-100 text-[11px] font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-default';
+  var PILL_GO = 'px-2.5 py-1 rounded-full bg-cream-300 text-ink text-[11px] font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-default';
+
+  /** Commande à la fenêtre cachée de Mori ; résout sa réponse { ok, … } */
+  function command(action, extra, ms, onProgress) {
+    return new Promise(function (resolve) {
+      var id = String(Date.now()) + Math.random();
+      var timer = setTimeout(function () {
+        delete pendingCmd[id];
+        resolve({ ok: false, error: 'Pas de réponse de Mori : redémarrez Premiere Pro' });
+      }, ms || 8000);
+      pendingCmd[id] = {
+        progress: onProgress,
+        done: function (r) {
+          clearTimeout(timer);
+          delete pendingCmd[id];
+          resolve(r);
+        }
+      };
+      var msg = extra || {};
+      msg.id = id;
+      msg.action = action;
+      sendCepEvent('com.mori.console.cmd', JSON.stringify(msg));
+    });
+  }
+  function loadConfig() {
+    command('getConfig').then(function (r) {
+      conf = r.ok ? r : { error: r.error };
+      if (settingsOpen) renderSettings();
+    });
+  }
+  function toggleSettings(open) {
+    settingsOpen = open === undefined ? !settingsOpen : open;
+    capturing = false;
+    if (settingsOpen) {
+      loadConfig();
+      setInfo('Échap : retour à la liste');
+    } else setInfo('');
+    $('gear').className = $('gear').className.replace(/(^| )text-zinc-(100|500)(?= |$)/g, '') + (settingsOpen ? ' text-zinc-100' : ' text-zinc-500');
+    render();
+    list.scrollTop = 0;
+    if (!settingsOpen) input.focus();
+  }
+  $('gear').addEventListener('click', function () {
+    toggleSettings();
+  });
+
+  function keyLabel(ev) {
+    if (ev.code === 'Space') return 'Espace';
+    if (/^F\d+$/.test(ev.code)) return ev.code;
+    if (ev.key && /^[a-z0-9]$/i.test(ev.key)) return ev.key.toUpperCase();
+    var m = /^(?:Key|Digit)(.)$/.exec(ev.code || '');
+    return m ? m[1] : ev.code;
+  }
+  function captureKey(ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (/^(Shift|Control|Alt|Meta|OS|AltGraph|CapsLock)$/.test(ev.key)) return; // on attend la touche principale
+    if (ev.key === 'Escape' && !(ev.ctrlKey || ev.altKey || ev.metaKey)) {
+      capturing = false;
+      keyMsg = '';
+      return renderSettings();
+    }
+    var hk = { code: ev.code, vk: ev.keyCode, label: keyLabel(ev), ctrl: ev.ctrlKey, alt: ev.altKey, shift: ev.shiftKey, meta: ev.metaKey };
+    capturing = false;
+    keyMsg = 'Enregistrement…';
+    renderSettings();
+    command('setHotkey', { hotkey: hk }).then(function (r) {
+      keyMsg = r.ok ? 'Nouveau raccourci : ' + r.label + '.' : r.error;
+      if (r.ok && conf) {
+        conf.label = r.label;
+        conf.isDefault = false;
+      }
+      loadConfig();
+      renderSettings();
+    });
+  }
+
+  function renderSettings() {
+    count.textContent = '';
+    var c = conf || {};
+    var section = function (title, body) {
+      return '<div class="space-y-1.5"><div class="text-[10px] uppercase tracking-wide text-zinc-500">' + title + '</div>' + body + '</div>';
+    };
+    var hint = function (text, tone) {
+      return text ? '<p class="text-[11px] leading-snug ' + (tone === 'err' ? 'text-red-300' : tone === 'ok' ? 'text-emerald-200' : 'text-zinc-500') + '">' + esc(text) + '</p>' : '';
+    };
+    var html = '<div class="px-4 py-2.5 space-y-3">';
+
+    // raccourci
+    var keyBox = capturing
+      ? '<span class="px-2.5 py-1 rounded-lg border border-emerald-400 text-emerald-200 text-[12px] font-semibold">Appuyez sur la combinaison…</span>'
+      : '<span class="px-2.5 py-1 rounded-lg bg-zinc-950 border border-white/10 text-zinc-100 text-[12px] font-semibold">' + esc(c.label || '…') + '</span>';
+    html += section('Raccourci de la console',
+      '<div class="flex flex-wrap items-center gap-1.5">' + keyBox +
+      (capturing ? '<button data-act="cancelKey" class="' + PILL + '">Annuler</button>'
+        : '<button data-act="captureKey" class="' + PILL + '"' + (c.label ? '' : ' disabled') + '>Modifier</button>' +
+          (c.label && !c.isDefault ? '<button data-act="resetKey" class="' + PILL + '">Par défaut</button>' : '')) +
+      '</div>' +
+      hint(capturing ? (c.mac ? 'Une lettre, un chiffre ou Espace avec ⌥, ⌃ ou ⌘. Échap : annuler.' : 'Une lettre, un chiffre, Espace ou F1 à F12, avec Ctrl ou Alt. Échap : annuler.')
+        : keyMsg || c.error, /impossible|refusé|Pas de réponse/.test(keyMsg || c.error || '') ? 'err' : /Nouveau/.test(keyMsg) ? 'ok' : ''));
+
+    // mises à jour
+    var u = upd, body = '<div class="flex flex-wrap items-center gap-1.5"><span class="text-[12px] text-zinc-200">' + esc((c.app || 'Mori') + ' ' + (c.version || '')) + '</span>';
+    if (u.state === 'available') body += '<button data-act="install" class="' + PILL_GO + '">Installer ' + esc(u.version) + '</button>';
+    else if (u.state !== 'installing' && u.state !== 'done') body += '<button data-act="check" class="' + PILL + '"' + (u.state === 'checking' ? ' disabled' : '') + '>' + (u.state === 'checking' ? 'Recherche…' : 'Rechercher une mise à jour') + '</button>';
+    body += '</div>';
+    if (u.state === 'uptodate') body += hint('Vous avez la dernière version.', 'ok');
+    if (u.state === 'available') body += hint('Version ' + u.version + ' disponible.' + (u.dev ? ' Copie de développement : pas d’installation automatique.' : '')) +
+      (u.notes ? '<div class="text-[11px] leading-snug text-zinc-400 whitespace-pre-line max-h-24 overflow-y-auto">' + esc(u.notes) + '</div>' : '');
+    if (u.state === 'installing') body += hint(u.text || 'Installation…');
+    if (u.state === 'done') body += hint((c.app || 'Mori') + ' ' + u.version + ' installé. Redémarrez Premiere Pro pour l’utiliser.', 'ok');
+    if (u.state === 'error') body += hint(u.error, 'err');
+    html += section('Mises à jour', body);
+
+    // diagnostic
+    var d = diag;
+    html += section('Diagnostic',
+      '<div class="flex items-center gap-1.5"><button data-act="diag" class="' + PILL + '"' + (d.state === 'busy' ? ' disabled' : '') + '>' +
+      (d.state === 'busy' ? 'Création… (10 s)' : 'Créer un rapport de diagnostic') + '</button></div>' +
+      (d.state === 'done' ? hint('Rapport créé sur le Bureau : ' + d.file, 'ok') : d.state === 'error' ? hint(d.error, 'err')
+        : hint('Un fichier texte à envoyer en cas de problème. Rien n’est envoyé automatiquement.')));
+
+    list.innerHTML = html + '</div>';
+  }
+
+  list.addEventListener('click', function (ev) {
+    var b = ev.target.closest && ev.target.closest('[data-act]');
+    if (!b || !settingsOpen) return;
+    var act = b.getAttribute('data-act');
+    if (act === 'captureKey') {
+      capturing = true;
+      keyMsg = '';
+      renderSettings();
+    } else if (act === 'cancelKey') {
+      capturing = false;
+      renderSettings();
+    } else if (act === 'resetKey') {
+      keyMsg = 'Enregistrement…';
+      renderSettings();
+      command('setHotkey', { hotkey: 'default' }).then(function (r) {
+        keyMsg = r.ok ? 'Nouveau raccourci : ' + r.label + '.' : r.error;
+        loadConfig();
+      });
+    } else if (act === 'check') {
+      upd = { state: 'checking' };
+      renderSettings();
+      command('checkUpdate', null, 20000).then(function (r) {
+        upd = !r.ok ? { state: 'error', error: r.error } : r.version ? { state: 'available', version: r.version, notes: r.notes, dev: r.dev } : { state: 'uptodate' };
+        renderSettings();
+      });
+    } else if (act === 'install') {
+      var v = upd.version;
+      upd = { state: 'installing', version: v, text: 'Téléchargement…' };
+      renderSettings();
+      command('installUpdate', null, 300000, function (text) {
+        upd.text = text;
+        renderSettings();
+      }).then(function (r) {
+        upd = r.ok ? { state: 'done', version: r.version || v } : { state: 'error', error: 'Mise à jour impossible : ' + r.error };
+        renderSettings();
+      });
+    } else if (act === 'diag') {
+      diag = { state: 'busy' };
+      renderSettings();
+      command('diagnostic', null, 40000).then(function (r) {
+        diag = r.ok ? { state: 'done', file: r.file } : { state: 'error', error: r.error };
+        renderSettings();
+      });
+    }
   });
   /** Touche de la console ; rend true si elle a servi */
   function onKey(k, shift, command) {
@@ -549,6 +738,14 @@
     return true;
   }
   document.addEventListener('keydown', function (ev) {
+    if (capturing) return captureKey(ev);
+    if (settingsOpen) {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        toggleSettings(false);
+      }
+      return;
+    }
     // déjà traitée : la même touche vient d'être transmise par le script du raccourci (macOS)
     if (Date.now() - (relayedAt[ev.key] || 0) < 150) return ev.preventDefault();
     if (onKey(ev.key, ev.shiftKey, ev.ctrlKey || ev.metaKey)) ev.preventDefault();
@@ -573,6 +770,7 @@
   });
   document.querySelectorAll('[data-kind]').forEach(function (b) {
     b.addEventListener('click', function () {
+      if (settingsOpen) toggleSettings(false);
       kindFilter = b.getAttribute('data-kind');
       cursorKey = null;
       render();

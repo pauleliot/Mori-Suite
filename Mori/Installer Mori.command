@@ -89,9 +89,24 @@ for old_id in com.cypher.studio com.cutflow.studio; do
     fi
   fi
 done
+# Mori Console seule (gratuite, paquet com.mori.console) : remplacée par la console incluse dans Mori ;
+# favoris, récents et presets de la console repris
+for old_cache in "$CEP_CACHE"/*_com.mori.console.window; do
+  [ -d "$old_cache/Local Storage" ] || continue
+  new_cache="${old_cache%com.mori.console.window}com.mori.studio.console"
+  if [ ! -d "$new_cache/Local Storage" ]; then
+    mkdir -p "$new_cache" && cp -R "$old_cache/Local Storage" "$new_cache/" && ok 'favoris de Mori Console repris'
+  fi
+done
+STANDALONE="$HOME/Library/Application Support/Adobe/CEP/extensions/com.mori.console"
+if [ -d "$STANDALONE" ]; then
+  rm -rf "$STANDALONE" && ok 'Mori Console seule remplacée par la console de Mori'
+fi
 mkdir -p "$BIN"
 
 ARCH="$(uname -m)" # arm64 (Apple Silicon) ou x86_64 (Intel)
+# sous Rosetta, uname -m répond x86_64 même sur Apple Silicon : on demande au processeur lui-même
+[ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ] && ARCH=arm64
 if [ "$ARCH" = "arm64" ]; then FF_ARCH=arm64; DENO_ARCH=aarch64; else FF_ARCH=amd64; DENO_ARCH=x86_64; fi
 
 # 3. FFmpeg + ffprobe
