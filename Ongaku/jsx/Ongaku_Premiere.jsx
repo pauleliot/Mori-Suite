@@ -274,6 +274,70 @@ $.Ongaku = (function () {
             } catch (e) { return fail(errText(e)); }
         },
 
+        /**
+         * Clip audio de la timeline a retravailler : le clip audio selectionne, sinon celui sous la tete
+         * de lecture (pistes ciblees d'abord). Renvoie son fichier, sa piste et ses points (secondes).
+         */
+        getTimelineAudioClip: function (mode) {
+            try {
+                // mode 'selection' (surveillance du panneau) : uniquement la selection, rien = { none: true }
+                var watch = mode === 'selection';
+                if (!app.project) return watch ? ok({ none: true }) : fail(T.noProject);
+                var seq = app.project.activeSequence;
+                if (!seq) return watch ? ok({ none: true }) : fail(T.noSeq);
+                var found = watch ? selectedAudioClip(seq) : (selectedAudioClip(seq) || audioClipUnderPlayhead(seq));
+                var playhead = seq.getPlayerPosition().seconds;
+                if (!found && watch) return ok({ none: true, playhead: playhead });
+                if (!found) return fail('Aucun clip audio s\u00e9lectionn\u00e9 ni sous la t\u00eate de lecture');
+                var c = found.clip, path = '';
+                try { path = c.projectItem.getMediaPath(); } catch (e0) {}
+                if (!path) return watch ? ok({ none: true }) : fail('Le clip \u00ab ' + c.name + ' \u00bb n\'est pas un fichier audio');
+                var speed = 1;
+                try { speed = c.getSpeed(); } catch (e1) {}
+                return ok({
+                    path: path, name: c.name, trackIndex: found.index, track: seq.audioTracks[found.index].name,
+                    start: c.start.seconds, end: c.end.seconds, inPoint: c.inPoint.seconds, outPoint: c.outPoint.seconds,
+                    speed: speed, how: found.how, nodeId: c.nodeId ? String(c.nodeId) : '', playhead: playhead
+                });
+            } catch (e) { return fail(errText(e)); }
+        },
+
+        /**
+         * Remplace le clip d'origine (piste trackIndex, debut oldStart, fichier oldPath) par le rendu newPath
+         * pose a newStart. Si la queue du rendu deborde sur un clip suivant de la meme piste, le rendu va
+         * sur une piste libre (rien n'est ecrase) et l'original est retire.
+         */
+        replaceTimelineClip: function (trackIndex, oldStart, oldPath, newPath, newStart, newDuration, cat, binName) {
+            try {
+                if (!app.project) return fail(T.noProject);
+                var seq = app.project.activeSequence;
+                if (!seq) return fail(T.noSeq);
+                var track = seq.audioTracks[Number(trackIndex)];
+                if (!track) return fail('Piste audio introuvable');
+                var target = normPath(oldPath), old = null, i;
+                for (i = 0; i < track.clips.numItems; i++) {
+                    var c = track.clips[i], p = '';
+                    try { p = normPath(c.projectItem.getMediaPath()); } catch (e0) {}
+                    if (Math.abs(c.start.seconds - Number(oldStart)) < 0.01 && p === target) { old = c; break; }
+                }
+                if (!old) return fail('Le clip d\'origine a \u00e9t\u00e9 d\u00e9plac\u00e9 ou supprim\u00e9 : rechargez-le avec \u00ab Utiliser le clip de la timeline \u00bb');
+                var item = importFile(newPath, cat, binName);
+                var start = Math.max(0, Number(newStart)), end = start + (Number(newDuration) || 1);
+                // la piste d'origine est-elle libre (en dehors du clip remplace) sur toute la duree du rendu ?
+                var free = true;
+                for (i = 0; i < track.clips.numItems; i++) {
+                    var o = track.clips[i];
+                    if (o === old || (Math.abs(o.start.seconds - old.start.seconds) < 0.001 && o.name === old.name)) continue;
+                    if (o.start.seconds < end - 0.001 && o.end.seconds > start + 0.001) { free = false; break; }
+                }
+                old.remove(false, false);
+                var dest = free && !isLocked(track) ? track : pickAudioTrack(seq, start, end);
+                if (!dest) return fail(T.noTrack);
+                dest.overwriteClip(item, start);
+                return ok({ track: dest.name, sameTrack: dest === track, at: start });
+            } catch (e) { return fail(errText(e)); }
+        },
+
         clearClipMarkers: function (path) {
             try {
                 if (!app.project) return fail(T.noProject);
@@ -284,6 +348,53 @@ $.Ongaku = (function () {
             } catch (e) { return fail(errText(e)); }
         }
     };
+
+    /** Index de piste audio d'un element de timeline (nodeId si disponible, sinon debut + nom) */
+    function audioTrackIndexOf(seq, clip) {
+        for (var t = 0; t < seq.audioTracks.numTracks; t++) {
+            var clips = seq.audioTracks[t].clips;
+            for (var j = 0; j < clips.numItems; j++) {
+                var c = clips[j];
+                var same = (c.nodeId && clip.nodeId) ? c.nodeId === clip.nodeId
+                    : (Math.abs(c.start.seconds - clip.start.seconds) < 0.001 && c.name === clip.name);
+                if (same) return t;
+            }
+        }
+        return -1;
+    }
+    function selectedAudioClip(seq) {
+        var sel = null;
+        try { sel = seq.getSelection(); } catch (e) {}
+        for (var i = 0; sel && i < sel.length; i++) {
+            if (sel[i].mediaType !== 'Audio') continue;
+            var idx = audioTrackIndexOf(seq, sel[i]);
+            if (idx >= 0) return { clip: seq.audioTracks[idx].clips[indexInTrack(seq.audioTracks[idx], sel[i])], index: idx, how: 'selection' };
+        }
+        return null;
+    }
+    function indexInTrack(track, clip) {
+        for (var j = 0; j < track.clips.numItems; j++) {
+            var c = track.clips[j];
+            if ((c.nodeId && clip.nodeId) ? c.nodeId === clip.nodeId : (Math.abs(c.start.seconds - clip.start.seconds) < 0.001 && c.name === clip.name)) return j;
+        }
+        return 0;
+    }
+    function audioClipUnderPlayhead(seq) {
+        var pos = seq.getPlayerPosition().seconds, t, j, pass;
+        // 1er passage : pistes ciblees ; 2e : toutes les pistes, de A1 vers le bas
+        for (pass = 0; pass < 2; pass++) {
+            for (t = 0; t < seq.audioTracks.numTracks; t++) {
+                var tr = seq.audioTracks[t], targeted = false;
+                try { targeted = tr.isTargeted(); } catch (e) {}
+                if (pass === 0 && !targeted) continue;
+                for (j = 0; j < tr.clips.numItems; j++) {
+                    var c = tr.clips[j];
+                    if (c.start.seconds <= pos + 0.001 && c.end.seconds > pos + 0.001) return { clip: c, index: t, how: 'playhead' };
+                }
+            }
+        }
+        return null;
+    }
 
     function removeOngakuMarkers(markers) {
         var toRemove = [], m = markers.getFirstMarker();

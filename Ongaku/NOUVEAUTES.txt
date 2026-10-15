@@ -1,3 +1,10 @@
+1.9.0
+- Fins : sélectionnez une musique dans la timeline, elle s'ouvre directement dans Ongaku avec la partie utilisée ; « Rendre & remplacer le clip » pose la fin à sa place exacte (sur une piste libre si la queue déborde sur le clip suivant).
+- La tête de lecture d'Ongaku suit celle de Premiere sur le clip sélectionné.
+- Le panneau s'ouvre sur la Bibliothèque ; un clip sélectionné ouvre Fins, une désélection ramène à la Bibliothèque.
+- Fins épuré : valeurs à régler en cliquant-glissant comme dans Premiere (Maj : plus vite, Ctrl : plus fin), ou au clavier d'un simple clic.
+- Touche Espace fiable pour lecture / pause, ainsi que I, O, X et les flèches.
+
 1.8.0
 - Apparence : police de l'interface au choix (Urbanist, Space Grotesk, Inter) ou police importée, commune à Mori, Ongaku, Sori et Kiru.
 - Mises à jour : le panneau propose lui-même les nouvelles versions.

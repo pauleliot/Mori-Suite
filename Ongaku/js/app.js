@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.8.0'; // à garder identique à CSXS/manifest.xml
+  var APP_VERSION = '1.9.0'; // à garder identique à CSXS/manifest.xml
   var Lib = window.OngakuLib, An = window.OngakuAnalysis, Fx = window.OngakuEffects;
   var cs = new CSInterface();
   var inCEP = !!window.__adobe_cep__;
@@ -18,6 +18,7 @@
     zap: '<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>',
     sliders: '<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/>',
     copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+    film: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18"/><path d="M3 7.5h4"/><path d="M3 12h18"/><path d="M3 16.5h4"/><path d="M17 3v18"/><path d="M17 7.5h4"/><path d="M17 16.5h4"/>',
     back: '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
     markIn: '<path d="M9 4H5v16h4"/><path d="M11 12h9"/><path d="m16 8 4 4-4 4"/>',
     markOut: '<path d="M15 4h4v16h-4"/><path d="M13 12H4"/><path d="m8 8-4 4 4 4"/>',
@@ -52,7 +53,7 @@
   var PREFS_KEY = 'ongaku.prefs.v1';
   var DEFAULT_PREFS = {
     libs: { music: [], sfx: [] }, category: 'music', fileMode: 'copy', favorites: [], tab: 'music', sort: 'name', filter: 'all', folderFilter: '',
-    brand: 'Avril Films', renderDir: hasNode ? Lib.defaultRenderDir() : '',
+    renderDir: hasNode ? Lib.defaultRenderDir() : '',
     beats: { density: 'beat', mode: 'clip', color: 4, offset: 0 },
     fx: { effect: 'reverb', tail: 4, size: 0.6, mix: 0.9, window: 0.9, stop: 1.6, curve: 0.9, crackle: true, wow: true, fade: 3, snap: 'beat' }
   };
@@ -87,7 +88,7 @@
     files: [], list: [], query: '', showLimit: 200, scanning: false,
     current: null, buffer: null, loadToken: 0,
     inPt: null, outPt: null, beatScale: 1,
-    lastRender: null, pv: null
+    lastRender: null, pv: null, timelineClip: null
   };
 
   // ==================== Utilitaires ====================
@@ -399,8 +400,14 @@
   }
 
   // ==================== Chargement d'un morceau ====================
-  function selectTrack(f, autoplay) {
-    if (state.current === f) { if (state.pv) closePreview(); if (autoplay) toggle(); return; }
+  function selectTrack(f, autoplay, onReady) {
+    if (state.current === f) {
+      if (state.pv) closePreview();
+      if (autoplay) toggle();
+      if (onReady && state.buffer) onReady();
+      return;
+    }
+    state.timelineClip = null;
     stopSource(); stopPreview();
     pb.playing = false; pb.offset = 0;
     if (hasNode) dropUnusedExcerpt();
@@ -422,6 +429,7 @@
       renderPlayer();
       if (prefs.tab !== 'music') renderView();
       if (autoplay) play(0);
+      if (onReady && state.buffer) onReady();
     }).catch(function (e) {
       if (token !== state.loadToken) return;
       f.failed = true;
@@ -662,7 +670,7 @@
     var bpm = currentBpm();
     el.innerHTML =
       '<div class="cover" style="' + coverStyle(f) + '">' + (f.cover ? '' : icon(f.cat === 'sfx' ? 'zap' : 'music')) + '</div>' +
-      '<div class="pl-meta"><div class="pl-title">' + esc(f.title) + '</div><div class="pl-artist">' + esc(f.artist || f.name) + '</div></div>' +
+      '<div class="pl-meta"><div class="pl-title' + (timelineClipActive() ? ' linked' : '') + '"' + (timelineClipActive() ? ' title="Clip de la timeline (' + esc(state.timelineClip.track) + ')"' : '') + '>' + esc(f.title) + '</div><div class="pl-artist">' + esc(f.artist || f.name) + '</div></div>' +
       (bpm ? '<span class="pill accent">' + bpm + ' BPM</span>' : (f.analyzed ? '' : '<span class="pill">ANALYSE…</span>')) +
       '<button class="icon-btn" id="btnFavCur" title="Favori" style="' + (favSet.has(f.path) ? 'color:rgb(var(--cream-300))' : '') + '">' + icon('star', favSet.has(f.path) ? 'fill' : '') + '</button>';
     $('#btnFavCur').onclick = function () { toggleFav(f); };
@@ -1122,6 +1130,95 @@
   /** Libellé du dossier / chutier de destination pour les messages */
   function destLabel(f) { return copyMode() && projectRoot() ? '« ' + binNameFor(f.cat) + ' »' : 'le chutier « ' + binNameFor(f.cat) + ' »'; }
 
+  // ---------- Clip déjà posé dans la timeline ----------
+  /** Morceau de la bibliothèque pour ce fichier, sinon fiche créée à la volée (fichier hors bibliothèque) */
+  function fileForPath(path) {
+    var low = String(path).replace(/\\/g, '/').toLowerCase();
+    var same = state.files.filter(function (f) { return String(f.path).replace(/\\/g, '/').toLowerCase() === low; });
+    var hit = same.filter(function (f) { return f.cat === prefs.category; })[0] || same[0];
+    if (hit) return hit;
+    var name = Lib.basename(path), g = Lib.guessFromName(name), sfxDir = findCatDir('sfx');
+    var inSfx = /sfx/i.test(Lib.dirname(path)) || (sfxDir && low.indexOf(String(sfxDir).replace(/\\/g, '/').toLowerCase()) === 0);
+    return { path: path, name: name, folder: Lib.dirname(path), title: g.title, artist: g.artist, cat: inSfx ? 'sfx' : 'music', size: Lib.fileSize(path), adhoc: true };
+  }
+
+  /**
+   * « Utiliser le clip de la timeline » : charge le clip audio sélectionné (sinon celui sous la tête de
+   * lecture) avec ses points d'entrée / sortie, pour lui appliquer une fin et le remplacer par le rendu.
+   */
+  function useTimelineClip() {
+    if (!inCEP || !hasNode) { toast('Disponible dans Premiere Pro.', 'err'); return; }
+    toast('Lecture du clip de la timeline…', 'busy', true);
+    jsx('getTimelineAudioClip', []).then(function (r) {
+      if (!r.success) { toast(r.error, 'err'); return; }
+      loadTimelineClip(r, false);
+    });
+  }
+  /** Charge un clip de la timeline (r : réponse de getTimelineAudioClip) et ouvre l'onglet Fins */
+  function loadTimelineClip(r, auto) {
+    if (Math.abs((Number(r.speed) || 1) - 1) > 0.001) {
+      toast('Le clip « ' + r.name + ' » est à ' + Math.round(r.speed * 100) + ' % de vitesse : remettez-le à 100 % pour lui appliquer une fin.', 'err');
+      return;
+    }
+    if (!Lib.exists(r.path)) { if (!auto) toast('Fichier du clip introuvable : ' + r.path, 'err'); return; }
+    var f = fileForPath(r.path);
+    selectTrack(f, false, function () {
+      var d = state.buffer.duration;
+      state.inPt = r.inPoint > 0.01 ? Math.min(r.inPoint, d - 0.5) : null;
+      state.outPt = Math.min(r.outPoint, d);
+      state.timelineClip = r;
+      // tête de lecture d'Ongaku au même moment du morceau que celle de Premiere
+      if (r.playhead != null) { pb.offset = clipSourceTime(r, r.playhead); selWatch.playhead = r.playhead; }
+      if (prefs.tab !== 'fins' && appearance().visibleTabs.indexOf('fins') >= 0) { prefs.tab = 'fins'; renderTabs(); renderView(); }
+      renderPlayer(); afterIO();
+      if (!auto) toast('Clip « ' + r.name + ' » chargé (' + r.track + ', ' + fmt(r.start, true) + '). Réglez la fin puis « Rendre & remplacer ».');
+    });
+  }
+
+  /**
+   * Suivi de la sélection de la timeline : dès qu'un clip audio est sélectionné, il est chargé et
+   * l'onglet Fins s'ouvre ; quand plus rien n'est sélectionné, retour à la Bibliothèque.
+   * Relecture légère toutes les 0,5 s, seulement quand le panneau est visible.
+   */
+  var selWatch = { key: null, busy: false, timer: null, playhead: null };
+  /** Position dans le fichier qui correspond à la tête de lecture de la séquence (bornée au clip) */
+  function clipSourceTime(r, playhead) {
+    var t = r.inPoint + (playhead - r.start);
+    t = Math.max(r.inPoint, Math.min(r.outPoint, t));
+    return state.buffer ? Math.max(0, Math.min(state.buffer.duration, t)) : t;
+  }
+  function clipKey(r) { return r && !r.none ? [r.nodeId || '', r.path, r.trackIndex, r.start, r.inPoint, r.outPoint].join('|') : ''; }
+  function watchSelection() {
+    if (!inCEP || !hasNode) return;
+    var tick = function () {
+      if (closing || selWatch.busy || document.hidden) return;
+      selWatch.busy = true;
+      jsx('getTimelineAudioClip', ['selection']).then(function (r) {
+        selWatch.busy = false;
+        if (!r || !r.success) return;
+        var key = clipKey(r);
+        if (key === selWatch.key) {
+          // même clip : Ongaku suit la tête de lecture de Premiere quand elle bouge (sauf s'il joue lui-même)
+          if (key && r.playhead !== selWatch.playhead && timelineClipActive()) {
+            selWatch.playhead = r.playhead;
+            if (!pb.playing && !state.pv && state.buffer) seek(clipSourceTime(state.timelineClip, r.playhead));
+          }
+          return;
+        }
+        var first = selWatch.key === null;
+        selWatch.key = key;
+        if (key) loadTimelineClip(r, true);
+        else if (!first && prefs.tab === 'fins') { prefs.tab = 'music'; renderTabs(); renderView(); drawMain(); }
+      }, function () { selWatch.busy = false; });
+    };
+    tick();
+    selWatch.timer = setInterval(tick, 500);
+  }
+  function timelineClipActive() {
+    var tc = state.timelineClip, f = state.current;
+    return !!(tc && f && String(tc.path).replace(/\\/g, '/').toLowerCase() === String(f.path).replace(/\\/g, '/').toLowerCase());
+  }
+
   // ---------- Actions Premiere ----------
   function placeTrack(f) {
     if (!f || f.synth) { toast('Placement disponible dans Premiere Pro avec vos propres fichiers.', 'err'); return; }
@@ -1246,9 +1343,11 @@
     v.innerHTML = '<div class="card empty"><div class="big">' + icon(what === 'beats' ? 'activity' : 'wand') + '</div><h3>Choisissez un morceau</h3>' +
       '<div>' + (what === 'beats'
         ? 'Sélectionnez un titre dans la Bibliothèque : Ongaku détecte le BPM et les temps, puis pose les marqueurs dans votre séquence.'
-        : 'Sélectionnez un titre dans la Bibliothèque, puis choisissez le point de fin et l\'effet : reverb tail, vinyl stop ou fondu.') +
-      '</div><button class="btn-primary" id="goMusic">' + icon('music') + 'Aller à la bibliothèque</button></div>';
+        : 'Sélectionnez un titre dans la Bibliothèque, ou une musique déjà posée dans la timeline, puis choisissez le point de fin et l\'effet : reverb tail, vinyl stop ou fondu.') +
+      '</div><button class="btn-primary" id="goMusic">' + icon('music') + 'Aller à la bibliothèque</button>' +
+      (what === 'fins' ? '<button class="btn-ghost" id="goTimeline">' + icon('film') + 'Utiliser le clip de la timeline</button>' : '') + '</div>';
     $('#goMusic').onclick = function () { prefs.tab = 'music'; savePrefs(); renderTabs(); renderView(); };
+    if ($('#goTimeline')) $('#goTimeline').onclick = useTimelineClip;
   }
 
   function renderBeats() {
@@ -1313,8 +1412,8 @@
     { id: 'fade', name: 'Fondu', icon: 'fade', desc: 'Fondu de sortie qui finit pile au point choisi.' }
   ];
   function slider(id, label, val, min, max, step, unit) {
-    return '<div class="field"><div class="lbl">' + label + ' <b id="' + id + 'Val" class="editable" data-edit="' + id + '" data-min="' + min + '" data-max="' + max + '" title="Cliquer pour saisir une valeur">' + val + unit + '</b></div>' +
-      '<input type="range" id="' + id + '" data-unit="' + unit + '" min="' + min + '" max="' + max + '" step="' + step + '" value="' + val + '"/></div>';
+    return '<div class="pfield"><span>' + label + '</span><b class="editable" data-edit="' + id + '" data-min="' + min + '" data-max="' + max +
+      '" data-step="' + step + '" data-unit="' + unit + '" title="Glisser pour régler (Maj : plus vite, Ctrl : plus fin) · clic pour saisir">' + val + unit + '</b></div>';
   }
 
   var VINYL_STYLES = [
@@ -1340,7 +1439,8 @@
           '<div class="toggle ' + (o.crackle ? 'on' : '') + '" data-tg="crackle"><span class="sw"></span>Craquements du disque</div>' +
           '<div class="toggle ' + (o.wow ? 'on' : '') + '" data-tg="wow"><span class="sw"></span>Pleurage (wow)</div>'
         : slider('fade', 'Durée du fondu', o.fade, 0.5, 12, 0.5, ' s');
-    var res = state.lastRender;
+    var res = state.lastRender, tc = timelineClipActive() ? state.timelineClip : null;
+    var canRender = state.buffer && state.outPt != null;
     v.innerHTML =
       '<div class="scroll">' +
       '<div class="fx-cards">' + EFFECTS.map(function (e) {
@@ -1349,9 +1449,8 @@
       }).join('') + '</div>' +
       '<div class="card" style="display:flex;flex-direction:column;gap:12px">' +
       '<div class="summary">' + (state.outPt != null
-        ? '<span class="editable" data-edit="in" title="Début (In) : cliquer pour saisir">' + fmt(start, true) + '</span>' + icon('back', 'flip') +
-          '<b class="editable" data-edit="out" title="Point de fin (Out) : cliquer pour saisir">' + fmt(state.outPt, true) + '</b><span class="sep"></span>durée finale ' +
-          '<b class="editable" data-edit="final" title="Durée finale : cliquer pour saisir (déplace la fin)">' + fmt(state.outPt - start + extraFor(o), true) + '</b>'
+        ? '<span class="editable" data-edit="in" title="Début (In) : glisser pour régler · clic pour saisir">' + fmt(start, true) + '</span>' + icon('back', 'flip') +
+          '<b class="editable" data-edit="out" title="Fin (Out) : glisser pour régler · clic pour saisir">' + fmt(state.outPt, true) + '</b>'
         : icon('markOut') + '<span>Posez la fin avec <b>Out</b> (touche O) sous l\'onde</span>') + '</div>' +
       '<div class="selects">' +
       dropdown('snap', 'Caler la fin sur', o.snap, [['beat', 'Le temps'], ['bar', 'La mesure'], ['off', 'Libre']]) +
@@ -1359,10 +1458,13 @@
       '</div>' +
       '<div class="grid2">' + params + '</div>' +
       '<div class="btn-row">' +
-      '<button class="btn-ghost" id="btnPreview"' + (state.buffer && state.outPt != null ? '' : ' disabled') + '>' + icon('headphones') + (state.pv ? 'Recalculer' : 'Pré-écouter') + '</button>' +
-      '<button class="btn-primary" id="btnRender"' + (state.buffer && state.outPt != null ? '' : ' disabled') + '>' + icon('plus') + 'Rendre &amp; placer</button>' +
+      (tc
+        ? '<button class="btn-primary" id="btnReplace"' + (canRender ? '' : ' disabled') + '>' + icon('refresh') + 'Rendre &amp; remplacer le clip</button>'
+        : '<button class="btn-primary" id="btnRender"' + (canRender ? '' : ' disabled') + '>' + icon('plus') + 'Rendre &amp; placer</button>') +
       '</div>' +
-      '<button class="btn-ghost" id="btnRenderOnly" style="align-self:center;padding:6px 14px"' + (state.buffer && state.outPt != null ? '' : ' disabled') + '>' + icon('download') + 'Rendre dans le chutier seulement</button>' +
+      '<div class="btn-row" style="justify-content:center">' +
+      '<button class="btn-ghost" id="btnRenderOnly" style="flex:0 0 auto;padding:6px 14px"' + (canRender ? '' : ' disabled') + '>' + icon('download') + 'Rendre dans le chutier seulement</button>' +
+      '</div>' +
       (res ? '<div class="result" id="resultChip" draggable="true" title="Glisser vers la timeline">' + icon('grip') + '<span class="nm">' + esc(Lib.basename(res.path)) + '</span>' +
         '<span class="pill">' + fmt(res.duration) + '</span><button class="act" id="btnReveal" title="Afficher dans l\'explorateur">' + icon('external') + '</button></div>' : '') +
       '</div></div>';
@@ -1384,14 +1486,10 @@
     Array.prototype.forEach.call(v.querySelectorAll('[data-tg]'), function (t) {
       t.onclick = function () { var k = t.getAttribute('data-tg'); o[k] = !o[k]; savePrefs(); t.classList.toggle('on', o[k]); };
     });
-    Array.prototype.forEach.call(v.querySelectorAll('input[type=range]'), function (inp) {
-      inp.oninput = function () { o[inp.id] = +inp.value; $('#' + inp.id + 'Val').textContent = inp.value + inp.getAttribute('data-unit'); };
-      inp.onchange = function () { savePrefs(); renderFins(); };
-    });
     bindEditables(v, o);
-    $('#btnPreview').onclick = function () { doRender('preview'); };
-    $('#btnRender').onclick = function () { doRender('place'); };
+    if ($('#btnRender')) $('#btnRender').onclick = function () { doRender('place'); };
     $('#btnRenderOnly').onclick = function () { doRender('import'); };
+    if ($('#btnReplace')) $('#btnReplace').onclick = function () { doRender('replace'); };
     if (res) {
       bindDrag($('#resultChip'), function () { return res.path; });
       $('#btnReveal').onclick = function (e) { e.stopPropagation(); Lib.reveal(res.path); };
@@ -1406,42 +1504,82 @@
   }
 
   /**
-   * Valeurs cliquables de l'onglet Fins : un clic ouvre un petit champ, Entrée valide, Échap annule.
-   * Réglages : bornés au curseur. Temps : In, Out (calés sur le temps si l'option est active) ou durée finale.
+   * Valeurs « à glisser » comme dans Premiere : cliquer-glisser horizontalement fait varier la valeur
+   * (Maj ×10, Ctrl / ⌥ ×0,1) ; un simple clic ouvre la saisie au clavier.
    */
   function bindEditables(v, o) {
     Array.prototype.forEach.call(v.querySelectorAll('.editable'), function (el) {
-      el.onclick = function (e) {
-        e.stopPropagation();
-        var key = el.getAttribute('data-edit'), isTime = key === 'in' || key === 'out' || key === 'final';
-        var inp = document.createElement('input');
-        inp.className = 'inline-edit';
-        inp.value = isTime ? el.textContent : String(o[key]);
-        el.replaceWith(inp);
-        inp.focus(); inp.select();
-        var done = false;
-        var finish = function (commit) {
-          if (done) return;
-          done = true;
-          if (commit) {
-            var val = isTime ? parseTime(inp.value) : parseFloat(String(inp.value).replace(',', '.'));
-            if (!isFinite(val)) toast('Valeur illisible : ' + inp.value, 'err');
-            else if (isTime) setTimeValue(key, val, o);
-            else {
-              var min = +el.getAttribute('data-min'), max = +el.getAttribute('data-max');
-              o[key] = Math.round(Math.max(min, Math.min(max, val)) * 1000) / 1000;
-              savePrefs();
-            }
+      el.onmousedown = function (e) {
+        if (e.button !== 0) return;
+        e.preventDefault(); e.stopPropagation();
+        var key = el.getAttribute('data-edit'), isTime = key === 'in' || key === 'out';
+        var x0 = e.clientX, moved = false;
+        var dur = state.buffer ? state.buffer.duration : 0;
+        var startVal = isTime ? (key === 'in' ? (state.inPt != null ? state.inPt : 0) : state.outPt) : +o[key];
+        var min = +el.getAttribute('data-min'), max = +el.getAttribute('data-max'), step = +el.getAttribute('data-step') || 0.01;
+        var unit = el.getAttribute('data-unit') || '', decimals = (String(step).split('.')[1] || '').length;
+        var mv = function (ev) {
+          var dx = ev.clientX - x0;
+          if (!moved && Math.abs(dx) < 3) return;
+          moved = true;
+          document.body.classList.add('scrubbing');
+          var mult = ev.shiftKey ? 10 : (ev.ctrlKey || ev.altKey || ev.metaKey ? 0.1 : 1);
+          if (isTime) {
+            // 1 px = 20 ms ; le début reste 0,5 s avant la fin, le tout dans le morceau
+            var t = startVal + dx * 0.02 * mult;
+            if (key === 'in') { t = Math.max(0, Math.min(t, state.outPt - 0.5)); state.inPt = t > 0.001 ? t : null; }
+            else { t = Math.max((state.inPt || 0) + 0.5, Math.min(dur, t)); state.outPt = t; }
+            el.textContent = fmt(t, true);
+            drawMain();
+          } else {
+            // toute la plage du réglage en ~200 px, arrondie au pas du réglage
+            var val = startVal + dx * ((max - min) / 200) * mult;
+            val = Math.max(min, Math.min(max, Math.round(val / step) * step));
+            o[key] = +val.toFixed(decimals);
+            el.textContent = o[key] + unit;
           }
-          renderFins();
         };
-        inp.onkeydown = function (ev) {
-          if (ev.key === 'Enter') finish(true);
-          else if (ev.key === 'Escape') { ev.stopPropagation(); finish(false); }
+        var up = function () {
+          document.removeEventListener('mousemove', mv);
+          document.removeEventListener('mouseup', up);
+          document.body.classList.remove('scrubbing');
+          if (!moved) { startInlineEdit(el, o); return; }
+          if (isTime) afterIO(); else { savePrefs(); renderFins(); }
         };
-        inp.onblur = function () { finish(true); };
+        document.addEventListener('mousemove', mv);
+        document.addEventListener('mouseup', up);
       };
     });
+  }
+  /** Saisie au clavier d'une valeur (simple clic) : Entrée valide, Échap annule */
+  function startInlineEdit(el, o) {
+    var key = el.getAttribute('data-edit'), isTime = key === 'in' || key === 'out';
+    var inp = document.createElement('input');
+    inp.className = 'inline-edit';
+    inp.value = isTime ? el.textContent : String(o[key]);
+    el.replaceWith(inp);
+    inp.focus(); inp.select();
+    var done = false;
+    var finish = function (commit) {
+      if (done) return;
+      done = true;
+      if (commit) {
+        var val = isTime ? parseTime(inp.value) : parseFloat(String(inp.value).replace(',', '.'));
+        if (!isFinite(val)) toast('Valeur illisible : ' + inp.value, 'err');
+        else if (isTime) setTimeValue(key, val, o);
+        else {
+          var min = +el.getAttribute('data-min'), max = +el.getAttribute('data-max');
+          o[key] = Math.round(Math.max(min, Math.min(max, val)) * 1000) / 1000;
+          savePrefs();
+        }
+      }
+      renderFins();
+    };
+    inp.onkeydown = function (ev) {
+      if (ev.key === 'Enter') finish(true);
+      else if (ev.key === 'Escape') { ev.stopPropagation(); finish(false); }
+    };
+    inp.onblur = function () { finish(true); };
   }
   function setTimeValue(key, val, o) {
     var dur = state.buffer ? state.buffer.duration : (state.current && state.current.duration) || 0;
@@ -1491,6 +1629,18 @@
         return Lib.writeFile(p, Fx.encodeWav(out, fo.bits)).then(function () {
           state.lastRender = { path: p, duration: out.duration };
           if (prefs.tab === 'fins') renderFins();
+          var fxName = EFFECTS.filter(function (x) { return x.id === opts.effect; })[0].name;
+          if (kind === 'replace' && state.timelineClip) {
+            // le rendu commence au début In : il se pose là où ce moment du morceau était dans la timeline
+            var tc = state.timelineClip, newStart = tc.start + (start - tc.inPoint);
+            return jsx('replaceTimelineClip', [tc.trackIndex, tc.start, tc.path, p, newStart, out.duration, f.cat, bin]).then(function (r) {
+              if (!r.success) { toast('Rendu enregistré, mais : ' + r.error, 'err'); return; }
+              state.timelineClip = null;
+              if (prefs.tab === 'fins') renderFins();
+              toast('Clip remplacé par la fin « ' + fxName + ' » sur « ' + r.track + ' »' +
+                (r.sameTrack ? '' : ' (la queue débordait sur le clip suivant de ' + tc.track + ')') + '. Ctrl+Z dans Premiere pour annuler.');
+            });
+          }
           if (kind === 'place') {
             return jsx('insertAtPlayhead', [p, out.duration, null, null, f.cat, bin]).then(function (r) {
               if (r.success) toast('Fin « ' + EFFECTS.filter(function (x) { return x.id === opts.effect; })[0].name + ' » placée sur « ' + r.track + ' » (fichier dans « ' + bin + ' »).');
@@ -1545,7 +1695,7 @@
   ];
   var DEFAULT_APPEARANCE = {
     theme: { background: '#0c1322', accent: '#8ea8f7', primary: '#fbe6a6' },
-    brandLabel: 'Avril Films', brandColor: '#a9bfff', visibleTabs: ['music', 'beats', 'fins'], userPresets: []
+    brandLabel: 'Studio', brandColor: '#a9bfff', visibleTabs: ['music', 'beats', 'fins'], userPresets: []
   };
   function appearance() {
     if (!prefs.appearance) {
@@ -1957,7 +2107,7 @@
     if (closing) return;
     closing = true;
     try { stopSource(); pb.playing = false; } catch (e) {}
-    clearTimeout(idleTimer); clearTimeout(excerptTimer); clearInterval(projectTimer);
+    clearTimeout(idleTimer); clearTimeout(excerptTimer); clearInterval(projectTimer); clearInterval(selWatch.timer);
     if (io) io.disconnect();
     visible.clear();
     state.buffer = null; state.pv = null;
@@ -1994,10 +2144,13 @@
     $('#btnSettings').innerHTML = icon('settings');
     $('#btnSettings').onclick = openSettings;
     if (hasNode) Lib.loadCache();
+    // ouverture sur la Bibliothèque ; un clip sélectionné dans la timeline ouvre Fins (watchSelection)
+    prefs.tab = 'music';
     renderTabs();
     renderPlayer();
     renderView();
     rescan();
+    watchSelection();
 
     registerShortcuts();
     var isTyping = function (e) { return /INPUT|TEXTAREA|SELECT/.test(e.target.tagName) || e.target.isContentEditable; };

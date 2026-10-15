@@ -178,10 +178,13 @@
 
   function exists(p) { try { return fs.existsSync(p); } catch (e) { return false; } }
 
+  // arguments passés tels quels, sans shell : un nom de fichier contenant $(…) ou ` ne peut rien exécuter
   function reveal(p) {
     if (!childProcess) return;
-    if (platform === 'win32') childProcess.exec('explorer.exe /select,"' + p + '"');
-    else childProcess.exec('open -R "' + p.replace(/"/g, '\\"') + '"');
+    try {
+      if (platform === 'win32') childProcess.spawn('explorer.exe', ['/select,' + p], { detached: true, stdio: 'ignore' }).unref();
+      else childProcess.spawn('/usr/bin/open', ['-R', p], { detached: true, stdio: 'ignore' }).unref();
+    } catch (e) {}
   }
 
   // ---------- Tags ID3v2 (titre, artiste, pochette) ----------
@@ -344,7 +347,9 @@
     audioInfo: audioInfo,
     openFolder: function (p) {
       if (!childProcess) return;
-      childProcess.exec(platform === 'win32' ? 'explorer.exe "' + p + '"' : 'open "' + p.replace(/"/g, '\\"') + '"');
+      try {
+        childProcess.spawn(platform === 'win32' ? 'explorer.exe' : '/usr/bin/open', [p], { detached: true, stdio: 'ignore' }).unref();
+      } catch (e) {}
     },
     parseId3: parseId3,
     blobToThumb: blobToThumb,
