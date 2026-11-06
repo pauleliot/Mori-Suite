@@ -1,3 +1,8 @@
+2.12.10
+- Web (Mac) : recherche, aperçu et téléchargement bien plus rapides (yt-dlp démarrait en ~10 s à chaque action, maintenant ~0,3 s). Relancez l'installeur Mac pour en profiter.
+- Web (Mac) : ✂ Trim fonctionne (FFmpeg refusait la connexion sécurisée à YouTube).
+- Installeur Mac : FFmpeg et Deno installés en version Intel par un ancien installeur sont remplacés par la version Apple Silicon.
+
 2.12.9
 - Le panneau s'appelle « Mori — Studio » dans Fenêtre > Extensions dès l'installation (le nom choisi dans Apparence le remplace ensuite).
 

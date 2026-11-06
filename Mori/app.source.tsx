@@ -2638,9 +2638,12 @@ function searchFfmpegTools(): FfmpegTools | null {
 }
 
 /** Environnement des outils lancés : sortie UTF-8 forcée (sinon Windows perd les caractères non latins) */
+// Mac : le FFmpeg embarqué (OpenSSL) ne trouve pas seul les certificats du système et refuse alors les adresses
+// https (« certificate verify failed ») : le ✂ Trim du téléchargement en ligne échouait. On lui indique ceux de macOS.
 function toolEnv(): any {
   const env = (window as any).cep_node?.process?.env || {};
-  return { ...env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' };
+  const certs = !isWindowsPlatform() && !env.SSL_CERT_FILE ? { SSL_CERT_FILE: '/etc/ssl/cert.pem' } : {};
+  return { ...env, ...certs, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' };
 }
 
 function runProcess(bin: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -11387,7 +11390,7 @@ export default function App() {
 // ==================== components/AboutMori.tsx ====================
 
 /** Version affichée dans « À propos » : à garder alignée sur CSXS/manifest.xml */
-const APP_VERSION = '2.12.9';
+const APP_VERSION = '2.12.10';
 /** Version de Mori Checker (application autonome) : à garder alignée sur checker/package.json */
 const CHECKER_VERSION = '1.2.0';
 

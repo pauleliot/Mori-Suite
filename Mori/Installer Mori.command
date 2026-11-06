@@ -5,6 +5,7 @@
 #   - autorisation des extensions non signées dans Premiere Pro (CEP 9 à 14)
 #   - copie du panneau (par-dessus une version existante, sans rien supprimer)
 #   - FFmpeg + ffprobe, yt-dlp et Deno téléchargés depuis leurs sources officielles dans bin/mac s'ils manquent
+#     (ou s'ils sont en version Intel sur un Mac Apple Silicon)
 
 cd "$(dirname "$0")" || exit 1
 SOURCE="$(pwd -P)"
@@ -108,11 +109,17 @@ ARCH="$(uname -m)" # arm64 (Apple Silicon) ou x86_64 (Intel)
 # sous Rosetta, uname -m répond x86_64 même sur Apple Silicon : on demande au processeur lui-même
 [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ] && ARCH=arm64
 if [ "$ARCH" = "arm64" ]; then FF_ARCH=arm64; DENO_ARCH=aarch64; else FF_ARCH=amd64; DENO_ARCH=x86_64; fi
+# outil de bin/mac en version Intel sur Apple Silicon (anciens installeurs) : il tourne sous Rosetta, plus lent
+intel_on_arm() { [ "$ARCH" = "arm64" ] && [ -f "$1" ] && ! file -b "$1" | grep -q arm64; }
 
 # 3. FFmpeg + ffprobe
 step 3 'FFmpeg (conversion vidéo et audio)'
 FFMPEG="$BIN/ffmpeg"; FFPROBE="$BIN/ffprobe"
-if [ ! -x "$FFMPEG" ]; then
+if intel_on_arm "$FFMPEG" || intel_on_arm "$FFPROBE"; then
+  info 'version Intel remplacée par la version Apple Silicon'
+  rm -f "$FFMPEG" "$FFPROBE"
+fi
+if [ ! -x "$FFMPEG" ] || [ ! -x "$FFPROBE" ]; then
   if [ -n "$(find_system ffmpeg)" ] && [ -n "$(find_system ffprobe)" ]; then
     FFMPEG="$(find_system ffmpeg)"; FFPROBE="$(find_system ffprobe)"
     info 'déjà installé sur ce Mac'
@@ -125,21 +132,51 @@ if [ ! -x "$FFMPEG" ]; then
 fi
 
 # 4. yt-dlp (+ mise à jour : YouTube change souvent)
+# Version « dossier » (yt-dlp_macos.zip) et non le fichier unique yt-dlp_macos : celui-ci se décompresse dans un
+# dossier temporaire neuf à chaque lancement et macOS revérifie alors ses ~100 bibliothèques, ~10 s par recherche,
+# aperçu ou téléchargement. Décompressé une fois dans bin/mac/yt-dlp_macos, il démarre en ~0,3 s.
+# bin/mac/yt-dlp est un petit script qui le lance : c'est le chemin que cherche le panneau.
 step 4 'yt-dlp (téléchargement de vidéos en ligne)'
 YTDLP="$BIN/yt-dlp"
-if [ -x "$YTDLP" ]; then
-  info 'mise à jour…'
-  "$YTDLP" -U >/dev/null 2>&1 || info 'mise à jour impossible, version actuelle conservée'
+YTDIR="$BIN/yt-dlp_macos"
+install_ytdlp() {
+  download 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos.zip' "$TMP/yt-dlp.zip" 'yt-dlp (~55 Mo)' || return 1
+  rm -rf "$TMP/yt-dlp_macos"
+  unzip -o -q "$TMP/yt-dlp.zip" -d "$TMP/yt-dlp_macos" && [ -f "$TMP/yt-dlp_macos/yt-dlp_macos" ] \
+    || { fail 'archive yt-dlp illisible'; return 1; }
+  rm -rf "$YTDIR" && mv "$TMP/yt-dlp_macos" "$YTDIR" && chmod +x "$YTDIR/yt-dlp_macos" || { fail "copie de yt-dlp impossible"; return 1; }
+  rm -f "$YTDLP"
+  printf '#!/bin/sh\n# Mori : lance yt-dlp en version dossier (démarrage rapide sur macOS)\nexec "$(dirname "$0")/yt-dlp_macos/yt-dlp_macos" "$@"\n' > "$YTDLP"
+  chmod +x "$YTDLP"
+}
+if [ -x "$YTDIR/yt-dlp_macos" ]; then
+  # pas de mise à jour intégrée (-U) pour la version dossier : on compare avec la dernière version publiée
+  CURRENT="$("$YTDLP" --version 2>/dev/null)"
+  LATEST="$(curl -fsIL -o /dev/null -w '%{url_effective}' https://github.com/yt-dlp/yt-dlp/releases/latest 2>/dev/null)"
+  LATEST="${LATEST##*/}"
+  if [ -n "$LATEST" ] && [ "$LATEST" != "$CURRENT" ]; then
+    info "mise à jour ($CURRENT → $LATEST)…"
+    install_ytdlp || info 'mise à jour impossible, version actuelle conservée'
+  else
+    info "déjà à jour ($CURRENT)"
+  fi
+elif [ -f "$YTDLP" ]; then
+  info 'ancienne version (lente à démarrer) remplacée'
+  install_ytdlp
 elif [ -n "$(find_system yt-dlp)" ]; then
   YTDLP="$(find_system yt-dlp)"
   info 'déjà installé sur ce Mac'
 else
-  download 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos' "$YTDLP" 'yt-dlp (~35 Mo)'
+  install_ytdlp
 fi
 
 # 5. Deno (moteur JavaScript demandé par yt-dlp pour YouTube)
 step 5 'Deno (requis par yt-dlp pour YouTube)'
 DENO="$BIN/deno"
+if intel_on_arm "$DENO"; then
+  info 'version Intel remplacée par la version Apple Silicon'
+  rm -f "$DENO"
+fi
 if [ ! -x "$DENO" ]; then
   if [ -n "$(find_system deno)" ]; then
     DENO="$(find_system deno)"
@@ -157,7 +194,7 @@ xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null
 printf '\n  Vérification\n'
 check 'FFmpeg' "$FFMPEG" -hide_banner -version
 check 'ffprobe' "$FFPROBE" -hide_banner -version
-check 'yt-dlp' "$YTDLP" --version
+check 'yt-dlp' "$YTDLP" --version # premier lancement (~10 s) : macOS vérifie une fois pour toutes ses bibliothèques
 check 'Deno' "$DENO" --version
 
 echo
