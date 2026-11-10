@@ -864,6 +864,64 @@ function evalExtendScriptNow<T = any>(script: string, timeoutMs: number): { resu
 // Durée du dernier parcours du projet (attente dans la file comprise) : sur un gros projet ou un Premiere chargé,
 // les scans automatiques s'espacent au lieu d'occuper ExtendScript en continu
 let lastProjectScanMs = 0;
+// ---------- Scans automatiques légers ----------
+// Premiere exécute les scripts sur son fil principal : pendant un parcours complet du projet (chemin de chaque média),
+// il ne répond plus, et la console (⌥Espace) attend. Les modes auto Audio et Chutier lisent donc d'abord une
+// signature du projet (nombre d'éléments, médias à la racine), bien moins coûteuse, partagée entre les deux, et ne
+// refont le travail complet que si elle a changé (ou au plus toutes les 2 min).
+export const AUTO_FULL_SCAN_EVERY_MS = 2 * 60 * 1000;
+let signaturePromise: Promise<{ success: boolean; key?: string }> | null = null;
+let signatureAt = 0;
+export function readProjectSignature(): Promise<{ success: boolean; key?: string }> {
+  if (signaturePromise && Date.now() - signatureAt < 1500) return signaturePromise;
+  signatureAt = Date.now();
+  signaturePromise = evalExtendScript(
+    `(function () {
+      if (!app.project) return JSON.stringify({ success: true, key: "none" });
+      var total = 0, bins = 0, root = 0;
+      function walk(bin, isRoot) {
+        var kids = bin.children, n = kids.numItems;
+        total += n;
+        for (var i = 0; i < n; i++) {
+          var it = kids[i];
+          if (it.type === ProjectItemType.BIN) { bins++; walk(it, false); } else if (isRoot) root++;
+        }
+      }
+      walk(app.project.rootItem, true);
+      return JSON.stringify({ success: true, key: app.project.path + "|" + total + "|" + bins + "|" + root });
+    })()`,
+    20000
+  );
+  return signaturePromise;
+}
+
+// La console d'effets s'ouvre ou est affichée : les scans automatiques attendent qu'elle se ferme, pour que Premiere
+// lui réponde tout de suite (raccourci, liste des effets, application). Garde-fou : 1 min, la fermeture par la croix
+// ne prévenant pas toujours.
+let scanPauseUntil = 0;
+export function autoScanPaused(): boolean {
+  return Date.now() < scanPauseUntil;
+}
+(function listenConsole() {
+  const cep = typeof window !== 'undefined' ? (window as any).__adobe_cep__ : null;
+  if (!cep || typeof cep.addEventListener !== 'function') return;
+  const pause = (ms: number) => {
+    scanPauseUntil = Date.now() + ms;
+  };
+  try {
+    cep.addEventListener('com.mori.console.opening', () => pause(20000));
+    cep.addEventListener('com.mori.console.ready', (ev: any) => {
+      let what = '';
+      try {
+        what = String((typeof ev === 'string' ? JSON.parse(ev) : ev).data || '');
+      } catch {}
+      if (what !== 'load') pause(60000);
+    });
+    cep.addEventListener('com.mori.console.closed', () => pause(1500));
+    cep.addEventListener('com.mori.console.hide', () => pause(1500));
+  } catch {}
+})();
+
 /** Pause avant le prochain scan automatique : 3,5 s, ou 5 fois la durée du dernier scan (1 min au plus) */
 export function autoScanDelayMs(): number {
   return Math.min(60000, Math.max(3500, lastProjectScanMs * 5));
@@ -4437,6 +4495,8 @@ export const AudioConverter: React.FC<AudioConverterProps> = ({
 
   const insidePremiere = isRunningInPremiere();
   const isLoopRunningRef = useRef(false);
+  // signature du projet au dernier parcours complet (scans automatiques légers)
+  const lastFullRef = useRef<{ key: string; at: number }>({ key: '', at: 0 });
 
   const highlightInBin = async (items: ConvertedProjectItem[]) => {
     if (items.length === 0 || !insidePremiere) return;
@@ -4478,9 +4538,15 @@ export const AudioConverter: React.FC<AudioConverterProps> = ({
       isLoopRunningRef.current = true;
 
       try {
+        // console ouverte, ou projet inchangé depuis le dernier parcours complet : rien à refaire
+        if (autoScanPaused()) return;
+        const sig = await readProjectSignature();
+        if (isCancelled) return;
+        if (sig?.success && sig.key === lastFullRef.current.key && Date.now() - lastFullRef.current.at < AUTO_FULL_SCAN_EVERY_MS) return;
         setIsScanning(true);
         const res = await scanPremiereProjectMemory();
         if (isCancelled) return;
+        if (res && res.success && sig?.success) lastFullRef.current = { key: sig.key as string, at: Date.now() };
 
         if (res && res.success) {
           setScanResult(res);
@@ -4651,6 +4717,8 @@ export const AutoBinning: React.FC<AutoBinningProps> = ({ rules, onOpenSettings 
 
   const insidePremiere = isRunningInPremiere();
   const isLoopRunningRef = useRef(false);
+  // signature du projet au dernier parcours complet (scans automatiques légers)
+  const lastFullRef = useRef<{ key: string; at: number }>({ key: '', at: 0 });
 
   // Boucle de surveillance active séquentielle et résiliente
   useEffect(() => {
@@ -4662,9 +4730,15 @@ export const AutoBinning: React.FC<AutoBinningProps> = ({ rules, onOpenSettings 
       isLoopRunningRef.current = true;
 
       try {
+        // console ouverte, ou projet inchangé depuis le dernier parcours complet : rien à refaire
+        if (autoScanPaused()) return;
+        const sig = await readProjectSignature();
+        if (isCancelled) return;
+        if (sig?.success && sig.key === lastFullRef.current.key && Date.now() - lastFullRef.current.at < AUTO_FULL_SCAN_EVERY_MS) return;
         setIsScanning(true);
         const res = await scanPremiereProjectMemory();
         if (isCancelled) return;
+        if (res && res.success && sig?.success) lastFullRef.current = { key: sig.key as string, at: Date.now() };
 
         if (res && res.success) {
           setScanResult(res);

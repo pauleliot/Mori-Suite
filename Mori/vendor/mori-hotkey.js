@@ -186,6 +186,8 @@
         }
         if (text !== 'HOTKEY') continue;
         openedAt = Date.now();
+        // le panneau Mori suspend ses scans automatiques : Premiere doit répondre à la console
+        sendCepEvent('com.mori.console.opening', '');
         trace('raccourci pressé');
         openConsole();
       }

@@ -7,6 +7,7 @@
 - Web (Mac) : ✂ Trim fonctionne (FFmpeg refusait la connexion sécurisée à YouTube).
 - Mac : FFmpeg et Deno installés en version Intel par un ancien installeur sont remplacés par la version Apple Silicon, par l'installeur ou par le panneau au démarrage.
 - Audio, Vidéo, Chutier : le mode automatique (éteint par défaut) est retrouvé dans l'état où vous l'avez laissé à la fermeture.
+- Modes automatiques Audio et Chutier bien plus légers : ils ne reparcourent le projet que s'il a changé, et se mettent en pause pendant que la console est ouverte (elle s'affichait avec plusieurs secondes de retard). Redémarrez Premiere après la mise à jour.
 - Mises à jour : un paquet sans empreinte ou hébergé ailleurs que sur les Releases GitHub de la suite est refusé ; si la copie échoue en route, la version précédente est remise.
 - « Délai d'attente ExtendScript dépassé » bien plus rare : l'import, le rangement des chutiers, la relinke audio et les marqueurs laissent à Premiere le temps de répondre, un délai dépassé n'en déclenche plus d'autres, et le scan automatique du projet s'espace sur les gros projets.
 
