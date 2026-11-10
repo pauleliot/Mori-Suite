@@ -9,6 +9,8 @@
  *  - Version plus récente que celle du CSXS/manifest.xml du panneau : bandeau « Mettre à jour ».
  *  - Mettre à jour : téléchargement du paquet (GitHub Releases), contrôle de l'empreinte SHA-256, décompression,
  *    copie par-dessus le dossier du panneau (les outils téléchargés, bin/, sont gardés), puis rechargement du panneau.
+ *    Refusé : paquet sans empreinte, ou hébergé ailleurs que dans les Releases GitHub de la suite. Si la copie échoue
+ *    en route, les fichiers déjà remplacés sont remis comme avant (pas de panneau à moitié mis à jour).
  *  - Copie de développement (fichier .debug dans le dossier) : le bandeau signale la version, sans rien installer.
  * Autonome : ni dépendance ni CSS du panneau ; ne fait rien hors de Premiere (pas de Node).
  */
@@ -17,6 +19,8 @@
   var FEED = 'https://pauleliot.github.io/updates.json';
   var EVERY = 6 * 3600 * 1000;
   var KEEP = ['bin', '.debug', '.git']; // jamais remplacés ni supprimés
+  // seules origines admises pour un paquet : les Releases GitHub de la suite (http local : essais sur cet ordinateur)
+  var TRUSTED = /^(https:\/\/github\.com\/pauleliot\/[\w.-]+\/releases\/download\/|http:\/\/(127\.0\.0\.1|localhost)[:/])/;
 
   var me = document.currentScript || {};
   var APP = (me.dataset && me.dataset.app) || '';
@@ -80,13 +84,42 @@
       ch.on('close', function (code) { if (code === 0) resolve(dest); else reject(new Error('archive illisible')); });
     });
   }
-  function copyInto(src, dst) {
+  /** Fichiers du paquet à copier : [{ from, to }] (KEEP exclus à la racine comme en profondeur, comme avant) */
+  function plan(src, dst, out) {
     fs.readdirSync(src).forEach(function (n) {
       if (KEEP.indexOf(n) >= 0) return;
       var a = path.join(src, n), b = path.join(dst, n);
-      if (fs.statSync(a).isDirectory()) { if (!fs.existsSync(b)) fs.mkdirSync(b); copyInto(a, b); }
-      else fs.writeFileSync(b, fs.readFileSync(a));
+      if (fs.statSync(a).isDirectory()) plan(a, b, out); else out.push({ from: a, to: b });
     });
+    return out;
+  }
+  function mkdirs(dir) { if (!fs.existsSync(dir)) { mkdirs(path.dirname(dir)); fs.mkdirSync(dir); } }
+  /**
+   * Copie le paquet par-dessus le panneau. Les fichiers qui vont être remplacés sont d'abord sauvegardés dans
+   * backupDir : à la moindre erreur (disque plein, fichier verrouillé…), ceux déjà écrits sont remis comme avant
+   * et les nouveaux retirés, puis l'erreur remonte.
+   */
+  function copyInto(src, dst, backupDir) {
+    var files = plan(src, dst, []), done = [];
+    mkdirs(backupDir);
+    files.forEach(function (f, i) {
+      var st = null;
+      try { st = fs.statSync(f.to); } catch (e) {}
+      f.backup = st && st.isFile() ? path.join(backupDir, String(i)) : '';
+      if (f.backup) fs.writeFileSync(f.backup, fs.readFileSync(f.to));
+    });
+    try {
+      files.forEach(function (f) {
+        mkdirs(path.dirname(f.to));
+        done.push(f);
+        fs.writeFileSync(f.to, fs.readFileSync(f.from));
+      });
+    } catch (e) {
+      done.forEach(function (f) {
+        try { if (f.backup) fs.writeFileSync(f.to, fs.readFileSync(f.backup)); else fs.unlinkSync(f.to); } catch (e2) {}
+      });
+      throw new Error('copie impossible (' + (e.code || e.message || e) + ') : version précédente conservée');
+    }
   }
   function rm(p) {
     try {
@@ -97,9 +130,11 @@
   /** Télécharge, vérifie et installe la version info dans target ; résout la version installée */
   function install(info, target, onStep) {
     var tmp = path.join(os.tmpdir(), 'suite-update-' + APP + '-' + Date.now()), zip = tmp + '.zip';
+    if (!TRUSTED.test(String(info.url || ''))) return Promise.reject(new Error('origine du paquet non reconnue : mise à jour annulée'));
+    if (!/^[0-9a-f]{64}$/i.test(String(info.sha256 || ''))) return Promise.reject(new Error('paquet sans empreinte : mise à jour annulée'));
     onStep('Téléchargement…');
     return get(info.url, zip).then(function () {
-      if (info.sha256 && sha256(zip) !== String(info.sha256).toLowerCase()) throw new Error('paquet altéré (empreinte différente) : mise à jour annulée');
+      if (sha256(zip) !== String(info.sha256).toLowerCase()) throw new Error('paquet altéré (empreinte différente) : mise à jour annulée');
       onStep('Installation…');
       return unzip(zip, tmp);
     }).then(function () {
@@ -107,9 +142,9 @@
       var top = fs.readdirSync(tmp).map(function (n) { return path.join(tmp, n); }).filter(function (p) { return fs.statSync(p).isDirectory(); });
       var src = top.length === 1 && !fs.existsSync(path.join(tmp, 'CSXS')) ? top[0] : tmp;
       if (!fs.existsSync(path.join(src, 'CSXS', 'manifest.xml'))) throw new Error('paquet incomplet');
-      copyInto(src, target);
+      copyInto(src, target, tmp + '-backup');
       return info.version;
-    }).then(function (v) { rm(tmp); rm(zip); return v; }, function (e) { rm(tmp); rm(zip); throw e; });
+    }).then(function (v) { rm(tmp); rm(zip); rm(tmp + '-backup'); return v; }, function (e) { rm(tmp); rm(zip); rm(tmp + '-backup'); throw e; });
   }
 
   // ==================== Bandeau ====================

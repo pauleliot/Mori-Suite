@@ -4153,7 +4153,8 @@ export const AudioConverter = ({
   onOpenSettings
 }) => {
   // Statut initial inactif (OFF) par défaut selon la demande
-  const [autoScanActive, setAutoScanActive] = useState(false);
+  const [autoScanActive, setAutoScanActive] = useState(() => readSetting(AUTO_SCAN_KEYS.audio, false) === true);
+  useEffect(() => writeSetting(AUTO_SCAN_KEYS.audio, autoScanActive), [autoScanActive]);
   const [scanResult, setScanResult] = useState(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isRelinking, setIsRelinking] = useState(false);
@@ -4367,7 +4368,8 @@ export const AutoBinning = ({
   onOpenSettings
 }) => {
   // Statut initial inactif (OFF) par défaut selon la demande
-  const [autoScanActive, setAutoScanActive] = useState(false);
+  const [autoScanActive, setAutoScanActive] = useState(() => readSetting(AUTO_SCAN_KEYS.binning, false) === true);
+  useEffect(() => writeSetting(AUTO_SCAN_KEYS.binning, autoScanActive), [autoScanActive]);
   const [scanResult, setScanResult] = useState(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
@@ -4507,6 +4509,8 @@ const VIDEO_SETTINGS_KEYS = {
   autoImport: 'cutflow.videoAutoImport'
 };
 const VFR_SCAN_INTERVAL_MS = 15000;
+// Scans automatiques (Audio, Vidéo, Chutier) : éteints par défaut, puis retrouvés dans l'état laissé à la fermeture
+const AUTO_SCAN_KEYS = { audio: 'cutflow.autoScan.audio', video: 'cutflow.autoScan.video', binning: 'cutflow.autoScan.binning' };
 const ACTIVE_JOB_STATUSES = ['queued', 'probing', 'converting', 'importing'];
 function readSetting(key, fallback) {
   try {
@@ -4528,7 +4532,8 @@ export const VideoTranscoder = () => {
   const [autoImport, setAutoImport] = useState(() => readSetting(VIDEO_SETTINGS_KEYS.autoImport, true));
   const [jobs, setJobs] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
-  const [vfrAutoScan, setVfrAutoScan] = useState(false);
+  const [vfrAutoScan, setVfrAutoScan] = useState(() => readSetting(AUTO_SCAN_KEYS.video, false) === true);
+  useEffect(() => writeSetting(AUTO_SCAN_KEYS.video, vfrAutoScan), [vfrAutoScan]);
   const [isScanningProject, setIsScanningProject] = useState(false);
   const [scanSummary, setScanSummary] = useState(null);
   // cadence déjà analysée par fichier (true = variable) : le scan auto ne réanalyse que les nouveaux clips
@@ -11630,7 +11635,12 @@ export default function App() {
     try {
       syncOn = !!JSON.parse(localStorage.getItem(REVIEW_SYNC_KEY) || '{}').enabled;
     } catch {}
-    return syncOn ? ['audio', 'markers'] : ['audio'];
+    // scan automatique laissé actif à la fermeture : son onglet tourne lui aussi dès l'ouverture
+    const tabs = ['audio'];
+    if (readSetting(AUTO_SCAN_KEYS.video, false) === true) tabs.push('video');
+    if (readSetting(AUTO_SCAN_KEYS.binning, false) === true) tabs.push('binning');
+    if (syncOn) tabs.push('markers');
+    return tabs;
   });
   useEffect(() => {
     setVisitedTabs(prev => prev.includes(activeTab) ? prev : [...prev, activeTab]);

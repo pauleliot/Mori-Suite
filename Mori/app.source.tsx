@@ -4331,7 +4331,8 @@ export const AudioConverter: React.FC<AudioConverterProps> = ({
   onOpenSettings,
 }) => {
   // Statut initial inactif (OFF) par défaut selon la demande
-  const [autoScanActive, setAutoScanActive] = useState<boolean>(false);
+  const [autoScanActive, setAutoScanActive] = useState<boolean>(() => readSetting(AUTO_SCAN_KEYS.audio, false) === true);
+  useEffect(() => writeSetting(AUTO_SCAN_KEYS.audio, autoScanActive), [autoScanActive]);
   const [scanResult, setScanResult] = useState<PremiereProjectScanResult | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isRelinking, setIsRelinking] = useState(false);
@@ -4548,7 +4549,8 @@ interface AutoBinningProps {
 
 export const AutoBinning: React.FC<AutoBinningProps> = ({ rules, onOpenSettings }) => {
   // Statut initial inactif (OFF) par défaut selon la demande
-  const [autoScanActive, setAutoScanActive] = useState<boolean>(false);
+  const [autoScanActive, setAutoScanActive] = useState<boolean>(() => readSetting(AUTO_SCAN_KEYS.binning, false) === true);
+  useEffect(() => writeSetting(AUTO_SCAN_KEYS.binning, autoScanActive), [autoScanActive]);
   const [scanResult, setScanResult] = useState<PremiereProjectScanResult | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
@@ -4705,6 +4707,8 @@ interface VideoJob {
 
 const VIDEO_SETTINGS_KEYS = { mode: 'cutflow.videoMode', autoImport: 'cutflow.videoAutoImport' };
 const VFR_SCAN_INTERVAL_MS = 15000;
+// Scans automatiques (Audio, Vidéo, Chutier) : éteints par défaut, puis retrouvés dans l'état laissé à la fermeture
+const AUTO_SCAN_KEYS = { audio: 'cutflow.autoScan.audio', video: 'cutflow.autoScan.video', binning: 'cutflow.autoScan.binning' };
 const ACTIVE_JOB_STATUSES: VideoJob['status'][] = ['queued', 'probing', 'converting', 'importing'];
 
 function readSetting<T>(key: string, fallback: T): T {
@@ -4729,7 +4733,8 @@ export const VideoTranscoder: React.FC = () => {
   const [autoImport, setAutoImport] = useState<boolean>(() => readSetting(VIDEO_SETTINGS_KEYS.autoImport, true));
   const [jobs, setJobs] = useState<VideoJob[]>([]);
   const [isDragging, setIsDragging] = useState(false);
-  const [vfrAutoScan, setVfrAutoScan] = useState(false);
+  const [vfrAutoScan, setVfrAutoScan] = useState(() => readSetting(AUTO_SCAN_KEYS.video, false) === true);
+  useEffect(() => writeSetting(AUTO_SCAN_KEYS.video, vfrAutoScan), [vfrAutoScan]);
   const [isScanningProject, setIsScanningProject] = useState(false);
   const [scanSummary, setScanSummary] = useState<{ message: string; isError?: boolean } | null>(null);
   // cadence déjà analysée par fichier (true = variable) : le scan auto ne réanalyse que les nouveaux clips
@@ -11176,7 +11181,12 @@ export default function App() {
     try {
       syncOn = !!JSON.parse(localStorage.getItem(REVIEW_SYNC_KEY) || '{}').enabled;
     } catch {}
-    return syncOn ? ['audio', 'markers'] : ['audio'];
+    // scan automatique laissé actif à la fermeture : son onglet tourne lui aussi dès l'ouverture
+    const tabs: ActiveTab[] = ['audio'];
+    if (readSetting(AUTO_SCAN_KEYS.video, false) === true) tabs.push('video');
+    if (readSetting(AUTO_SCAN_KEYS.binning, false) === true) tabs.push('binning');
+    if (syncOn) tabs.push('markers');
+    return tabs;
   });
   useEffect(() => {
     setVisitedTabs((prev) => (prev.includes(activeTab) ? prev : [...prev, activeTab]));
