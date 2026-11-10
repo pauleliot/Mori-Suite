@@ -668,6 +668,13 @@ function wrapExtendScript(script) {
 // son délai à son tour (timeouts en cascade). Garde-fou : au plus EXTENDSCRIPT_STUCK_MS de plus si rien ne revient.
 const EXTENDSCRIPT_STUCK_MS = 120000;
 let extendScriptQueue = Promise.resolve();
+// scripts dont le délai est dépassé et auxquels Premiere n'a pas encore répondu : tant qu'il y en a, les lectures
+// de fond (scans automatiques, nom du projet, marqueurs de la timeline) n'ajoutent rien à la file
+let extendScriptStalled = 0;
+/** Premiere n'a pas répondu au dernier script dans son délai (occupé, fenêtre ouverte) et n'a toujours pas répondu */
+export function premiereStalled() {
+  return extendScriptStalled > 0;
+}
 export function evalExtendScript(script, timeoutMs = 6000) {
   const job = extendScriptQueue.then(() => evalExtendScriptNow(script, timeoutMs));
   extendScriptQueue = job.then(j => j.settled, () => {});
@@ -677,13 +684,26 @@ export function evalExtendScript(script, timeoutMs = 6000) {
 /** result : réponse ou erreur de délai ; settled : Premiere a réellement fini (ou ne répondra plus) */
 function evalExtendScriptNow(script, timeoutMs) {
   script = wrapExtendScript(script);
-  let settle = () => {};
-  const settled = new Promise(r => { settle = r; });
+  let settleNow = () => {};
+  const settled = new Promise(r => {
+    settleNow = r;
+  });
+  let stalled = false;
+  const settle = () => {
+    if (stalled) {
+      stalled = false;
+      extendScriptStalled--;
+    }
+    settleNow();
+  };
   const result = new Promise(resolve => {
     const cs = getCSInterface();
     if (!cs) {
       settle();
-      return resolve({ success: false, error: "L'application est hors panneau Premiere Pro." });
+      return resolve({
+        success: false,
+        error: "L'application est hors panneau Premiere Pro."
+      });
     }
     const startedAt = Date.now();
     let resolved = false;
@@ -691,6 +711,8 @@ function evalExtendScriptNow(script, timeoutMs) {
     const timeout = setTimeout(() => {
       if (resolved) return;
       resolved = true;
+      stalled = true;
+      extendScriptStalled++;
       stuckTimer = setTimeout(settle, EXTENDSCRIPT_STUCK_MS);
       resolve({
         success: false,
@@ -698,7 +720,7 @@ function evalExtendScriptNow(script, timeoutMs) {
       });
     }, timeoutMs);
     try {
-      cs.evalScript(script, (rawResult) => {
+      cs.evalScript(script, rawResult => {
         settle();
         if (resolved) {
           // réponse arrivée après le délai : la durée réelle aide à régler le délai de l'action
@@ -710,7 +732,10 @@ function evalExtendScriptNow(script, timeoutMs) {
         clearTimeout(timeout);
         if (typeof rawResult === 'string' && rawResult.indexOf('CF_ERR:') === 0) {
           console.error('[CutFlow] ExtendScript:', rawResult);
-          return resolve({ success: false, error: 'ExtendScript : ' + rawResult.substring(7) });
+          return resolve({
+            success: false,
+            error: 'ExtendScript : ' + rawResult.substring(7)
+          });
         }
         if (!rawResult || rawResult === 'EvalScript error.' || rawResult === 'undefined') {
           console.error('[CutFlow] ExtendScript résultat brut :', rawResult);
@@ -722,7 +747,10 @@ function evalExtendScriptNow(script, timeoutMs) {
         try {
           resolve(JSON.parse(rawResult));
         } catch {
-          resolve({ success: true, data: rawResult });
+          resolve({
+            success: true,
+            data: rawResult
+          });
         }
       });
     } catch (err) {
@@ -730,10 +758,16 @@ function evalExtendScriptNow(script, timeoutMs) {
       if (resolved) return;
       resolved = true;
       clearTimeout(timeout);
-      resolve({ success: false, error: err?.message || 'Erreur inconnue CSInterface' });
+      resolve({
+        success: false,
+        error: err?.message || 'Erreur inconnue CSInterface'
+      });
     }
   });
-  return { result, settled };
+  return {
+    result,
+    settled
+  };
 }
 
 // Durée du dernier parcours du projet (attente dans la file comprise) : sur un gros projet ou un Premiere chargé,
@@ -750,8 +784,7 @@ let signatureAt = 0;
 export function readProjectSignature() {
   if (signaturePromise && Date.now() - signatureAt < 1500) return signaturePromise;
   signatureAt = Date.now();
-  signaturePromise = evalExtendScript(
-    `(function () {
+  signaturePromise = evalExtendScript(`(function () {
       if (!app.project) return JSON.stringify({ success: true, key: "none" });
       var total = 0, bins = 0, root = 0;
       function walk(bin, isRoot) {
@@ -764,9 +797,7 @@ export function readProjectSignature() {
       }
       walk(app.project.rootItem, true);
       return JSON.stringify({ success: true, key: app.project.path + "|" + total + "|" + bins + "|" + root });
-    })()`,
-    20000
-  );
+    })()`, 20000);
   return signaturePromise;
 }
 
@@ -775,17 +806,17 @@ export function readProjectSignature() {
 // ne prévenant pas toujours.
 let scanPauseUntil = 0;
 export function autoScanPaused() {
-  return Date.now() < scanPauseUntil;
+  return Date.now() < scanPauseUntil || premiereStalled();
 }
 (function listenConsole() {
-  const cep = typeof window !== 'undefined' ? (window).__adobe_cep__ : null;
+  const cep = typeof window !== 'undefined' ? window.__adobe_cep__ : null;
   if (!cep || typeof cep.addEventListener !== 'function') return;
-  const pause = (ms) => {
+  const pause = ms => {
     scanPauseUntil = Date.now() + ms;
   };
   try {
     cep.addEventListener('com.mori.console.opening', () => pause(20000));
-    cep.addEventListener('com.mori.console.ready', (ev) => {
+    cep.addEventListener('com.mori.console.ready', ev => {
       let what = '';
       try {
         what = String((typeof ev === 'string' ? JSON.parse(ev) : ev).data || '');
@@ -2552,13 +2583,57 @@ function toolEnv() {
     PYTHONUTF8: '1'
   };
 }
-function runProcess(bin, args) {
+
+// Programmes lancés par le panneau et encore en vie : arrêtés avec lui (fermeture du panneau ou de Premiere),
+// sinon un téléchargement ou une conversion continuerait seul en arrière-plan
+const liveChildren = new Set();
+function trackChild(child) {
+  liveChildren.add(child);
+  const drop = () => liveChildren.delete(child);
+  child.on('close', drop);
+  child.on('error', drop);
+  return child;
+}
+/**
+ * Arrête un programme et ceux qu'il a lancés. Sous Windows, yt-dlp.exe est un lanceur : le vrai yt-dlp (et son
+ * FFmpeg) est un processus enfant, que kill() laissait tourner — « Annuler » n'arrêtait pas le téléchargement.
+ */
+export function killProcessTree(child) {
+  if (!child || child.exitCode !== null || child.killed) return;
+  try {
+    if (isWindowsPlatform() && child.pid) {
+      nodeRequire('child_process').spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+        windowsHide: true,
+        stdio: 'ignore'
+      }).on('error', () => {
+        try {
+          child.kill();
+        } catch {}
+      });
+    } else child.kill();
+  } catch {}
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('unload', () => liveChildren.forEach(c => killProcessTree(c)));
+}
+
+/** timeoutMs : au-delà, le programme est arrêté et l'appel échoue (réseau figé, lecteur débranché…) ; 0 = sans limite */
+function runProcess(bin, args, timeoutMs = 0) {
   const cp = nodeRequire('child_process');
   return new Promise((resolve, reject) => {
-    const child = cp.spawn(bin, args, {
+    const child = trackChild(cp.spawn(bin, args, {
       windowsHide: true,
       env: toolEnv()
-    });
+    }));
+    let timedOut = false;
+    const timer = timeoutMs > 0 ? setTimeout(() => {
+      timedOut = true;
+      killProcessTree(child);
+      reject(new Error(`pas de réponse en ${Math.round(timeoutMs / 1000)} s`));
+    }, timeoutMs) : null;
+    const clear = () => timer && clearTimeout(timer);
+    child.on('close', clear);
+    child.on('error', clear);
     // décodage UTF-8 qui gère les caractères coupés entre deux blocs
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
@@ -2567,7 +2642,7 @@ function runProcess(bin, args) {
     child.stdout.on('data', d => stdout += d.toString());
     child.stderr.on('data', d => stderr += d.toString());
     child.on('error', reject);
-    child.on('close', code => resolve({
+    child.on('close', code => !timedOut && resolve({
       code,
       stdout,
       stderr
@@ -2792,9 +2867,9 @@ export function buildFfmpegArgs(input, output, plan, probe) {
 /** Lance FFmpeg et remonte la progression (0..1) à partir de `-progress pipe:1` */
 export function runFfmpegConversion(tools, args, durationSec, onProgress) {
   const cp = nodeRequire('child_process');
-  const child = cp.spawn(tools.ffmpeg, args, {
+  const child = trackChild(cp.spawn(tools.ffmpeg, args, {
     windowsHide: true
-  });
+  }));
   let canceled = false;
   let stderrTail = '';
   const promise = new Promise((resolve, reject) => {
@@ -2930,6 +3005,10 @@ export function setCustomDownloadDir(dir) {
 }
 
 /** Recherche yt-dlp : copie embarquée (bin/) > chemin choisi > installation système (PATH, winget, Homebrew) */
+/** yt-dlp vient d'être installé ou remplacé (vendor/mori-tools-*.js) : il est recherché de nouveau */
+export function forgetYtdlp() {
+  ytdlpCache = null;
+}
 export function findYtdlp() {
   if (ytdlpCache) return ytdlpCache;
   ytdlpCache = searchYtdlp();
@@ -2942,6 +3021,13 @@ function searchYtdlp() {
   if (!fs || !pathMod || !cp) return null;
   const win = isWindowsPlatform();
   const exe = win ? '.exe' : '';
+
+  // Windows : version « dossier » posée par vendor/mori-tools-win.js (démarre en ~0,5 s, contre 4 à 10 s pour le
+  // fichier unique, que l'antivirus réanalyse à chaque lancement)
+  if (win) {
+    const folder = pathMod.join(extensionRoot(), 'bin', 'win', 'yt-dlp_win', 'yt-dlp.exe');
+    if (fs.existsSync(folder)) return folder;
+  }
   const embedded = pathMod.join(extensionRoot(), 'bin', win ? 'win' : 'mac', 'yt-dlp' + exe);
   if (fs.existsSync(embedded)) return embedded;
   const custom = getCustomYtdlpPath();
@@ -2975,32 +3061,36 @@ function bundledDenoArgs() {
 // vidéo déjà vue ou la survoler avant de cliquer ne relance rien. Les adresses de flux de YouTube restent valables
 // plusieurs heures.
 const ONLINE_CACHE_MS = 20 * 60 * 1000;
+// lecture d'une page ou recherche : au-delà, yt-dlp est arrêté (réseau figé) au lieu de laisser le panneau attendre
+const YTDLP_READ_TIMEOUT_MS = 90 * 1000;
 // H.264 d'abord : le navigateur intégré de Premiere ne lit pas toujours l'AV1 ou le VP9
 const PREVIEW_FORMAT = 'bv*[height<=360][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=360][ext=mp4]+ba[ext=m4a]/bv*[height<=360]+ba/b[height<=480]/b/b*';
 const onlineCache = new Map();
 let prefetchRunning = 0;
-
 async function extractOnlineMedia(ytdlp, url) {
-  const base = ['-J', '--no-playlist', '--no-warnings', '--encoding', 'utf-8', ...bundledDenoArgs()];
-  let res = await runProcess(ytdlp, [...base, '-f', PREVIEW_FORMAT, '--', url]);
+  const base = ['-J', '--no-playlist', '--no-warnings', '--socket-timeout', '20', '--encoding', 'utf-8', ...bundledDenoArgs()];
+  let res = await runProcess(ytdlp, [...base, '-f', PREVIEW_FORMAT, '--', url], YTDLP_READ_TIMEOUT_MS);
   // aucun format d'aperçu sur ce site : les métadonnées restent lisibles sans sélection de format
-  if (res.code !== 0 && /Requested format is not available/i.test(res.stderr)) res = await runProcess(ytdlp, [...base, '--', url]);
+  if (res.code !== 0 && /Requested format is not available/i.test(res.stderr)) res = await runProcess(ytdlp, [...base, '--', url], YTDLP_READ_TIMEOUT_MS);
   if (res.code !== 0) {
     const last = res.stderr.trim().split(/\r?\n/).pop() || '';
     throw new Error(last.replace(/^ERROR:\s*/, '') || 'lien illisible');
   }
   const data = JSON.parse(res.stdout);
-  const heights = Array.from(
-    new Set((data.formats || []).filter((f) => f.vcodec && f.vcodec !== 'none' && f.height).map((f) => f.height))
-  ).sort((a, b) => b - a);
-  const isUrl = (u) => typeof u === 'string' && /^https?:/.test(u);
-  const picked = Array.isArray(data.requested_formats) ? data.requested_formats.filter((f) => f && isUrl(f.url)) : [];
+  const heights = Array.from(new Set((data.formats || []).filter(f => f.vcodec && f.vcodec !== 'none' && f.height).map(f => f.height))).sort((a, b) => b - a);
+  const isUrl = u => typeof u === 'string' && /^https?:/.test(u);
+  const picked = Array.isArray(data.requested_formats) ? data.requested_formats.filter(f => f && isUrl(f.url)) : [];
   let streams = null;
   if (picked.length > 0) {
-    const video = picked.find((f) => f.vcodec && f.vcodec !== 'none') || picked[0];
-    const audio = picked.find((f) => f !== video);
-    streams = { video: video.url, audio: audio ? audio.url : undefined };
-  } else if (isUrl(data.url)) streams = { video: data.url };
+    const video = picked.find(f => f.vcodec && f.vcodec !== 'none') || picked[0];
+    const audio = picked.find(f => f !== video);
+    streams = {
+      video: video.url,
+      audio: audio ? audio.url : undefined
+    };
+  } else if (isUrl(data.url)) streams = {
+    video: data.url
+  };
   return {
     info: {
       url: data.webpage_url || url,
@@ -3008,17 +3098,19 @@ async function extractOnlineMedia(ytdlp, url) {
       uploader: data.uploader || data.channel || '',
       durationSec: data.duration || 0,
       thumbnail: data.thumbnail || '',
-      heights,
+      heights
     },
-    streams,
+    streams
   };
 }
-
 function fetchOnlineMedia(ytdlp, url) {
   const hit = onlineCache.get(url);
   if (hit && Date.now() - hit.at < ONLINE_CACHE_MS) return hit.promise;
   const promise = extractOnlineMedia(ytdlp, url);
-  onlineCache.set(url, { at: Date.now(), promise });
+  onlineCache.set(url, {
+    at: Date.now(),
+    promise
+  });
   // un échec n'est pas gardé (vidéo momentanément refusée, réseau coupé…)
   promise.catch(() => onlineCache.get(url)?.promise === promise && onlineCache.delete(url));
   if (onlineCache.size > 200) {
@@ -3031,9 +3123,11 @@ function fetchOnlineMedia(ytdlp, url) {
 /** Extraction lancée d'avance (résultat survolé) : au clic, formats et aperçu sont déjà là. Deux à la fois au plus. */
 export function prefetchOnlineMedia(ytdlp, url) {
   const hit = onlineCache.get(url);
-  if ((hit && Date.now() - hit.at < ONLINE_CACHE_MS) || prefetchRunning >= 2) return;
+  if (hit && Date.now() - hit.at < ONLINE_CACHE_MS || prefetchRunning >= 2) return;
   prefetchRunning++;
-  const done = () => { prefetchRunning--; };
+  const done = () => {
+    prefetchRunning--;
+  };
   fetchOnlineMedia(ytdlp, url).then(done, done);
 }
 
@@ -3041,7 +3135,6 @@ export function prefetchOnlineMedia(ytdlp, url) {
 export async function fetchOnlineMediaInfo(ytdlp, url) {
   return (await fetchOnlineMedia(ytdlp, url)).info;
 }
-
 /** Recherche YouTube (yt-dlp « ytsearchN: »), sans télécharger : titres, chaînes, durées, miniatures */
 // Recherches déjà faites (10 min) : revenir sur les mêmes mots réaffiche la liste sans attendre
 const SEARCH_CACHE_MS = 10 * 60 * 1000;
@@ -3051,14 +3144,17 @@ export function searchYoutube(ytdlp, query, count) {
   const hit = searchCache.get(key);
   if (hit && Date.now() - hit.at < SEARCH_CACHE_MS) return hit.promise;
   const promise = searchYoutubeNow(ytdlp, query, count);
-  searchCache.set(key, { at: Date.now(), promise });
+  searchCache.set(key, {
+    at: Date.now(),
+    promise
+  });
   promise.catch(() => searchCache.get(key)?.promise === promise && searchCache.delete(key));
   if (searchCache.size > 50) searchCache.delete(searchCache.keys().next().value);
   return promise;
 }
 async function searchYoutubeNow(ytdlp, query, count) {
   const n = Math.max(1, Math.min(50, Math.round(count) || 10));
-  const res = await runProcess(ytdlp, ['-J', '--flat-playlist', '--no-warnings', '--encoding', 'utf-8', ...bundledDenoArgs(), '--', `ytsearch${n}:${query}`]);
+  const res = await runProcess(ytdlp, ['-J', '--flat-playlist', '--no-warnings', '--socket-timeout', '20', '--encoding', 'utf-8', ...bundledDenoArgs(), '--', `ytsearch${n}:${query}`], YTDLP_READ_TIMEOUT_MS);
   if (res.code !== 0) {
     const last = res.stderr.trim().split(/\r?\n/).pop() || '';
     throw new Error(last.replace(/^ERROR:\s*/, '') || 'recherche impossible');
@@ -3089,7 +3185,7 @@ export async function fetchPreviewStreams(ytdlp, url) {
 /** Version de yt-dlp (« 2026.10.26 »), vide si illisible */
 export async function readYtdlpVersion(ytdlp) {
   try {
-    const res = await runProcess(ytdlp, ['--version']);
+    const res = await runProcess(ytdlp, ['--version'], 120000);
     return res.code === 0 ? res.stdout.trim().split(/\r?\n/)[0] || '' : '';
   } catch {
     return '';
@@ -3102,13 +3198,14 @@ export async function readYtdlpVersion(ytdlp) {
  * Ailleurs : mise à jour intégrée de yt-dlp (« -U »), qui dit elle-même quand elle ne s'applique pas (Homebrew, winget…).
  */
 export async function updateYtdlp(ytdlp) {
-  const mac = (window).MoriToolsMac;
-  if (!isWindowsPlatform() && mac && typeof mac.updateYtdlp === 'function' && mac.ownsYtdlp(ytdlp)) {
+  // copie de Mori en version dossier (Mac comme Windows) : pas de « -U », le module d'outils la retélécharge
+  const mac = isWindowsPlatform() ? window.MoriToolsWin : window.MoriToolsMac;
+  if (mac && typeof mac.updateYtdlp === 'function' && mac.ownsYtdlp(ytdlp)) {
     const r = await mac.updateYtdlp();
     return r.updated ? `yt-dlp mis à jour : ${r.version}` : `yt-dlp est déjà à jour (${r.version})`;
   }
-  const res = await runProcess(ytdlp, ['-U']);
-  const lines = (res.stdout + '\n' + res.stderr).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const res = await runProcess(ytdlp, ['-U'], 5 * 60 * 1000);
+  const lines = (res.stdout + '\n' + res.stderr).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   const last = (lines.pop() || '').replace(/^ERROR:\s*/, '');
   if (res.code !== 0) throw new Error(last || 'mise à jour impossible');
   return /up to date/i.test(last) ? 'yt-dlp est déjà à jour' : /Updated yt-dlp to/i.test(last) ? 'yt-dlp mis à jour' : last || 'yt-dlp est à jour';
@@ -3813,10 +3910,10 @@ export function buildYtdlpArgs(url, format, maxHeight, outputDir, ffmpegPath, wa
 /** Lance yt-dlp ; progression 0..1 par étape (vidéo puis audio), résout avec le chemin du fichier final */
 export function runYtdlp(ytdlp, args, onProgress) {
   const cp = nodeRequire('child_process');
-  const child = cp.spawn(ytdlp, args, {
+  const child = trackChild(cp.spawn(ytdlp, args, {
     windowsHide: true,
     env: toolEnv()
-  });
+  }));
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   let canceled = false;
@@ -3876,9 +3973,7 @@ export function runYtdlp(ytdlp, args, onProgress) {
     promise,
     cancel: () => {
       canceled = true;
-      try {
-        child.kill();
-      } catch {}
+      killProcessTree(child);
     }
   };
 }
@@ -4324,7 +4419,10 @@ export const AudioConverter = ({
   const insidePremiere = isRunningInPremiere();
   const isLoopRunningRef = useRef(false);
   // signature du projet au dernier parcours complet (scans automatiques légers)
-  const lastFullRef = useRef({ key: '', at: 0 });
+  const lastFullRef = useRef({
+    key: '',
+    at: 0
+  });
   const highlightInBin = async items => {
     if (items.length === 0 || !insidePremiere) return;
     const res = await selectProjectItemsInPremiere(items.map(i => i.id)).catch(() => null);
@@ -4366,7 +4464,10 @@ export const AudioConverter = ({
         setIsScanning(true);
         const res = await scanPremiereProjectMemory();
         if (isCancelled) return;
-        if (res && res.success && sig?.success) lastFullRef.current = { key: sig.key, at: Date.now() };
+        if (res && res.success && sig?.success) lastFullRef.current = {
+          key: sig.key,
+          at: Date.now()
+        };
         if (res && res.success) {
           setScanResult(res);
 
@@ -4543,7 +4644,10 @@ export const AutoBinning = ({
   const insidePremiere = isRunningInPremiere();
   const isLoopRunningRef = useRef(false);
   // signature du projet au dernier parcours complet (scans automatiques légers)
-  const lastFullRef = useRef({ key: '', at: 0 });
+  const lastFullRef = useRef({
+    key: '',
+    at: 0
+  });
 
   // Boucle de surveillance active séquentielle et résiliente
   useEffect(() => {
@@ -4561,7 +4665,10 @@ export const AutoBinning = ({
         setIsScanning(true);
         const res = await scanPremiereProjectMemory();
         if (isCancelled) return;
-        if (res && res.success && sig?.success) lastFullRef.current = { key: sig.key, at: Date.now() };
+        if (res && res.success && sig?.success) lastFullRef.current = {
+          key: sig.key,
+          at: Date.now()
+        };
         if (res && res.success) {
           setScanResult(res);
 
@@ -4684,7 +4791,11 @@ const VIDEO_SETTINGS_KEYS = {
 };
 const VFR_SCAN_INTERVAL_MS = 15000;
 // Scans automatiques (Audio, Vidéo, Chutier) : éteints par défaut, puis retrouvés dans l'état laissé à la fermeture
-const AUTO_SCAN_KEYS = { audio: 'cutflow.autoScan.audio', video: 'cutflow.autoScan.video', binning: 'cutflow.autoScan.binning' };
+const AUTO_SCAN_KEYS = {
+  audio: 'cutflow.autoScan.audio',
+  video: 'cutflow.autoScan.video',
+  binning: 'cutflow.autoScan.binning'
+};
 const ACTIVE_JOB_STATUSES = ['queued', 'probing', 'converting', 'importing'];
 function readSetting(key, fallback) {
   try {
@@ -4712,6 +4823,11 @@ export const VideoTranscoder = () => {
   const [scanSummary, setScanSummary] = useState(null);
   // cadence déjà analysée par fichier (true = variable) : le scan auto ne réanalyse que les nouveaux clips
   const vfrCacheRef = useRef(new Map());
+  // signature du projet au dernier parcours complet (scan automatique léger)
+  const vfrLastFullRef = useRef({
+    key: '',
+    at: 0
+  });
   const scanningRef = useRef(false);
   const jobsRef = useRef([]);
   jobsRef.current = jobs;
@@ -4900,7 +5016,20 @@ export const VideoTranscoder = () => {
     let cancelled = false;
     let timer = null;
     const loop = async () => {
-      await scanProjectForVFR(false);
+      try {
+        // console ouverte, Premiere occupé, ou projet inchangé depuis le dernier parcours complet : rien à refaire
+        if (!autoScanPaused()) {
+          const sig = await readProjectSignature();
+          const last = vfrLastFullRef.current;
+          if (!cancelled && !(sig?.success && sig.key === last.key && Date.now() - last.at < AUTO_FULL_SCAN_EVERY_MS)) {
+            await scanProjectForVFR(false);
+            if (sig?.success) vfrLastFullRef.current = {
+              key: sig.key,
+              at: Date.now()
+            };
+          }
+        }
+      } catch {}
       if (!cancelled) timer = setTimeout(loop, VFR_SCAN_INTERVAL_MS);
     };
     loop();
@@ -5155,6 +5284,39 @@ export const WebDownloader = () => {
   useEffect(() => writeSetting('cutflow.webSearchCount', searchCount), [searchCount]);
   // Trim : ne télécharger qu'un passage (début / fin), repérable avec l'aperçu
   const [trimOn, setTrimOn] = useState(false);
+  // Ligne Télécharger : si le panneau est trop étroit pour le libellé, le bouton garde seulement son icône
+  // (libellé en infobulle) ; la ligne ne passe jamais à la ligne
+  const [compactDownload, setCompactDownload] = useState(false);
+  const downloadRowObserver = useRef(null);
+  const measureDownloadRow = useRef(null);
+  const measureCanvas = useRef(null);
+  const downloadRowRef = React.useCallback(row => {
+    downloadRowObserver.current?.disconnect();
+    downloadRowObserver.current = null;
+    measureDownloadRow.current = null;
+    if (!row) return;
+    const measure = () => {
+      const kids = Array.from(row.children);
+      const button = kids[kids.length - 1];
+      if (!button) return;
+      const others = kids.slice(0, -1).reduce((w, el) => w + el.offsetWidth, 0) + 6 * (kids.length - 1);
+      // place du bouton avec son libellé : texte mesuré dans la police du bouton + icône, écart et marges
+      const css = getComputedStyle(button);
+      const ctx = measureCanvas.current = measureCanvas.current || document.createElement('canvas').getContext('2d');
+      let text = 0;
+      if (ctx) {
+        ctx.font = `${css.fontWeight} ${css.fontSize} ${css.fontFamily}`;
+        text = ctx.measureText(row.getAttribute('data-label') || '').width;
+      }
+      setCompactDownload(row.clientWidth - others < text + 14 + 8 + 24 + 4);
+    };
+    measureDownloadRow.current = measure;
+    if (typeof ResizeObserver !== 'undefined') {
+      downloadRowObserver.current = new ResizeObserver(measure);
+      downloadRowObserver.current.observe(row);
+    }
+    measure();
+  }, []);
   const [trimStart, setTrimStart] = useState('');
   const [trimEnd, setTrimEnd] = useState('');
   const previewTimeRef = useRef(null);
@@ -5163,8 +5325,11 @@ export const WebDownloader = () => {
     setTrimStart('');
     setTrimEnd('');
   }, [info?.url]);
+
   // téléchargements en cours : de quoi annuler chacun, ceux déjà lancés, et leur nombre
   const cancelsRef = useRef(new Map());
+  // annulations demandées : vues aussi entre deux étapes (attente avant un nouvel essai, analyse, avant l'import)
+  const canceledIdsRef = useRef(new Set());
   const startedRef = useRef(new Set());
   const activeCountRef = useRef(0);
   const settingsRef = useRef({
@@ -5178,6 +5343,13 @@ export const WebDownloader = () => {
     setYtdlp(findYtdlp());
     setFfmpegTools(findFfmpegTools());
     resolveDownloadDir().then(setDownloadDir).catch(() => {});
+    // yt-dlp installé ou remplacé en arrière-plan (version rapide) : pris en compte sans redémarrer
+    const onTools = () => {
+      forgetYtdlp();
+      setYtdlp(findYtdlp());
+    };
+    window.addEventListener('mori-tools-changed', onTools);
+    return () => window.removeEventListener('mori-tools-changed', onTools);
   }, [nodeOk]);
   useEffect(() => writeSetting(WEB_SETTINGS_KEYS.format, format), [format]);
   useEffect(() => writeSetting(WEB_SETTINGS_KEYS.maxHeight, maxHeight), [maxHeight]);
@@ -5260,14 +5432,21 @@ export const WebDownloader = () => {
     setSelectedResult(null);
     setInfo(null);
   };
+
   /** Résultat de recherche téléchargé tout de suite, avec le format et la qualité réglés (sans passer par l'analyse) */
-  const quickDownload = (r) => {
-    setJobs((prev) => [
-      ...prev,
-      { id: `dl-${Date.now()}-${++downloadSeq}`, url: r.url, title: r.title, format, maxHeight, wav: currentWav, status: 'queued', progress: 0 },
-    ]);
+  const quickDownload = r => {
+    setJobs(prev => [...prev, {
+      id: `dl-${Date.now()}-${++downloadSeq}`,
+      url: r.url,
+      title: r.title,
+      format,
+      maxHeight,
+      wav: currentWav,
+      status: 'queued',
+      progress: 0
+    }]);
   };
-  const isQueued = (link) => jobs.some((j) => j.url === link && ACTIVE_DOWNLOAD_STATUSES.includes(j.status));
+  const isQueued = link => jobs.some(j => j.url === link && ACTIVE_DOWNLOAD_STATUSES.includes(j.status));
   // résultat survolé un instant : son extraction part d'avance, l'aperçu et les formats s'ouvrent alors sans attendre
   const hoverTimerRef = useRef(null);
   const hoverResult = r => {
@@ -5277,33 +5456,52 @@ export const WebDownloader = () => {
 
   // yt-dlp : version affichée et mise à jour depuis le panneau
   const [ytVersion, setYtVersion] = useState('');
-  const [ytUpdate, setYtUpdate] = useState({ busy: false, message: '' });
+  const [ytUpdate, setYtUpdate] = useState({
+    busy: false,
+    message: ''
+  });
   useEffect(() => {
     let alive = true;
-    if (ytdlp) readYtdlpVersion(ytdlp).then((v) => alive && setYtVersion(v));
+    if (ytdlp) readYtdlpVersion(ytdlp).then(v => alive && setYtVersion(v));
     return () => {
       alive = false;
     };
   }, [ytdlp]);
   const handleUpdateYtdlp = async () => {
     if (!ytdlp || ytUpdate.busy) return;
-    if (jobs.some((j) => ACTIVE_DOWNLOAD_STATUSES.includes(j.status))) {
-      setYtUpdate({ busy: false, message: 'Attendez la fin des téléchargements en cours.', isError: true });
+    if (jobs.some(j => ACTIVE_DOWNLOAD_STATUSES.includes(j.status))) {
+      setYtUpdate({
+        busy: false,
+        message: 'Attendez la fin des téléchargements en cours.',
+        isError: true
+      });
       return;
     }
-    setYtUpdate({ busy: true, message: 'Mise à jour de yt-dlp…' });
+    setYtUpdate({
+      busy: true,
+      message: 'Mise à jour de yt-dlp…'
+    });
     try {
       const message = await updateYtdlp(ytdlp);
       setYtVersion(await readYtdlpVersion(ytdlp));
-      setYtUpdate({ busy: false, message });
+      setYtUpdate({
+        busy: false,
+        message
+      });
     } catch (err) {
-      setYtUpdate({ busy: false, message: `Mise à jour impossible : ${err?.message || err}`, isError: true });
+      setYtUpdate({
+        busy: false,
+        message: `Mise à jour impossible : ${err?.message || err}`,
+        isError: true
+      });
     }
   };
-
   const processJob = async job => {
     if (!ytdlp) return;
     let output = '';
+    const stopIfCanceled = () => {
+      if (canceledIdsRef.current.has(job.id)) throw new Error('annulé');
+    };
     try {
       const dir = downloadDir || (await resolveDownloadDir());
       // YouTube refuse parfois ses propres liens (HTTP 403) : on relance l'extraction pour en obtenir de nouveaux
@@ -5327,10 +5525,13 @@ export const WebDownloader = () => {
           break;
         } catch (err) {
           if (err?.message === 'annulé' || !/403|Forbidden/i.test(err?.message || '') || attempt >= MAX_ATTEMPTS) throw err;
+          cancelsRef.current.delete(job.id);
           await new Promise(r => setTimeout(r, 1500 * attempt));
+          stopIfCanceled();
         }
       }
       cancelsRef.current.delete(job.id);
+      stopIfCanceled();
 
       // Vidéo hors H.264/HEVC (VP9/AV1 en 4K) ou à cadence variable : réencodage pour Premiere
       if (job.format === 'video' && ffmpegTools) {
@@ -5358,6 +5559,7 @@ export const WebDownloader = () => {
           output = converted;
         }
       }
+      stopIfCanceled();
       if (settingsRef.current.autoImport && isRunningInPremiere()) {
         updateJob(job.id, {
           status: 'importing',
@@ -5386,6 +5588,8 @@ export const WebDownloader = () => {
         status: canceled ? 'canceled' : 'error',
         message: canceled ? 'Téléchargement annulé' : `Échec : ${err?.message || err}`
       });
+    } finally {
+      canceledIdsRef.current.delete(job.id);
     }
   };
 
@@ -5401,17 +5605,21 @@ export const WebDownloader = () => {
       processJob(next).finally(() => {
         activeCountRef.current--;
         cancelsRef.current.delete(next.id);
-        setJobs((prev) => [...prev]);
+        setJobs(prev => [...prev]);
       });
     }
   }, [jobs, ytdlp]);
   const cancelJob = job => {
-    const cancel = cancelsRef.current.get(job.id);
-    if (cancel) cancel();
-    else if (job.status === 'queued') updateJob(job.id, {
-      status: 'canceled',
-      message: 'Retiré de la file'
-    });
+    if (job.status === 'queued' && !startedRef.current.has(job.id)) {
+      updateJob(job.id, {
+        status: 'canceled',
+        message: 'Retiré de la file'
+      });
+      return;
+    }
+    if (job.status === 'importing') return; // Premiere est déjà en train d'importer le fichier
+    canceledIdsRef.current.add(job.id);
+    cancelsRef.current.get(job.id)?.();
   };
   const handleChooseYtdlp = () => {
     const res = window.cep?.fs?.showOpenDialogEx?.(false, false, 'Choisir yt-dlp', '', isWindowsPlatform() ? ['exe'] : []);
@@ -5440,7 +5648,7 @@ export const WebDownloader = () => {
     sampleRate: 48000,
     bitDepth: 24
   };
-  const selectClass = 'bg-zinc-950 border border-white/10 rounded-full px-2.5 py-1.5 text-[11px] font-semibold text-zinc-200 focus:outline-none focus:border-emerald-400 cursor-pointer';
+  const selectClass = 'min-w-0 bg-zinc-950 border border-white/10 rounded-full px-2.5 py-1.5 text-[11px] font-semibold text-zinc-200 focus:outline-none focus:border-emerald-400 cursor-pointer';
 
   // passage à télécharger : début vide = 0, fin vide = fin de la vidéo
   const trim = (() => {
@@ -5456,10 +5664,16 @@ export const WebDownloader = () => {
       error
     };
   })();
+  React.useLayoutEffect(() => {
+    measureDownloadRow.current?.();
+  }, [trimOn, format, maxHeight, wavKey]);
   const previewTimeFor = url => previewTimeRef.current && previewTimeRef.current.url === url ? previewTimeRef.current.time : null;
+  const downloadLabel = trimOn ? 'Télécharger l’extrait' : 'Télécharger';
   const downloadControls = /*#__PURE__*/_jsxs("div", {
     className: "space-y-1.5",
     children: [/*#__PURE__*/_jsxs("div", {
+      ref: downloadRowRef,
+      "data-label": downloadLabel,
       className: "flex items-center gap-1.5",
       children: [/*#__PURE__*/_jsxs("select", {
         value: format,
@@ -5504,10 +5718,14 @@ export const WebDownloader = () => {
       }), /*#__PURE__*/_jsxs(PrimaryButton, {
         onClick: handleDownload,
         disabled: trimOn && !trim.valid,
-        className: "flex-1 !px-3",
+        title: compactDownload ? downloadLabel : undefined,
+        className: "flex-1 min-w-[2.75rem] !px-3 whitespace-nowrap",
         children: [/*#__PURE__*/_jsx(Download, {
-          className: "w-3.5 h-3.5"
-        }), trimOn ? 'Télécharger l’extrait' : 'Télécharger']
+          className: "w-3.5 h-3.5 flex-shrink-0"
+        }), !compactDownload && /*#__PURE__*/_jsx("span", {
+          className: "truncate",
+          children: downloadLabel
+        })]
       })]
     }), trimOn && info && /*#__PURE__*/_jsxs("div", {
       className: "rounded-lg border border-white/10 bg-zinc-900/60 p-2 space-y-1.5",
@@ -5544,6 +5762,8 @@ export const WebDownloader = () => {
             })
           }), /*#__PURE__*/_jsx("input", {
             type: "text",
+            spellCheck: false,
+            autoComplete: "off",
             value: f.value,
             onChange: e => f.set(e.target.value),
             placeholder: f.placeholder,
@@ -5579,6 +5799,10 @@ export const WebDownloader = () => {
         className: "flex gap-1.5",
         children: [/*#__PURE__*/_jsx("input", {
           type: "text",
+          spellCheck: false,
+          autoComplete: "off",
+          autoCorrect: "off",
+          autoCapitalize: "off",
           value: url,
           disabled: !ready,
           onChange: e => {
@@ -10719,7 +10943,7 @@ export const ReviewMarkersHub = ({
       const w = writesRef.current;
       const base = latestRef.current;
       // panneau masqué (autre onglet du groupe, fenêtre réduite) : Premiere n'est pas interrogé pour rien
-      if (busy || document.hidden || base.markers.length === 0 || w.active > 0) return;
+      if (busy || document.hidden || base.markers.length === 0 || w.active > 0 || autoScanPaused()) return;
       const withClips = needsClips(base.markers, base.placeOn);
       tick++;
       if (withClips && tick % 3 !== 0) return;
@@ -11980,7 +12204,15 @@ export default function App() {
   // Nom du projet ouvert, relu régulièrement pour suivre un changement de projet
   useEffect(() => {
     if (!isRunningInPremiere()) return;
-    const refresh = () => evalExtendScript('JSON.stringify({ success: true, name: app.project ? app.project.name : "" })').then(res => setCurrentProjectName(String(res?.name || ''))).catch(() => {});
+    // une seule lecture à la fois : quand Premiere tarde à répondre, elles ne s'empilent pas dans la file
+    let reading = false;
+    const refresh = () => {
+      if (reading || autoScanPaused()) return;
+      reading = true;
+      evalExtendScript('JSON.stringify({ success: true, name: app.project ? app.project.name : "" })').then(res => res && res.success !== false && setCurrentProjectName(String(res?.name || ''))).catch(() => {}).then(() => {
+        reading = false;
+      });
+    };
     refresh();
     // panneau masqué : pas de question à Premiere ; relu dès qu'il réapparaît
     const timer = setInterval(() => !document.hidden && refresh(), 5000);

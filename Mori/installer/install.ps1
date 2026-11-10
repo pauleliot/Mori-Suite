@@ -179,19 +179,40 @@ try {
 
   # 4. yt-dlp (+ mise à jour : YouTube change souvent)
   Step 4 'yt-dlp (téléchargement de vidéos en ligne)'
-  $ytdlp = Join-Path $Bin 'yt-dlp.exe'
+  # Version « dossier » (yt-dlp_win.zip) : elle démarre en une demi-seconde, alors que yt-dlp.exe en un seul fichier
+  # se décompresse à chaque lancement (4 à 10 s avant chaque recherche ou téléchargement). Le panneau la tient
+  # ensuite à jour lui-même (vendor/mori-tools-win.js).
+  $ytDir = Join-Path $Bin 'yt-dlp_win'
+  $ytdlp = Join-Path $ytDir 'yt-dlp.exe'
   if (Test-Path $ytdlp) {
-    Info 'mise à jour…'
-    $ErrorActionPreference = 'Continue'
-    try { & $ytdlp -U 2>&1 | Out-Null } catch { Info 'mise à jour impossible, version actuelle conservée' }
-    $ErrorActionPreference = 'Stop'
+    Info 'déjà en place (mise à jour : bouton « Mettre à jour yt-dlp » de l''onglet Web)'
   } else {
-    $sysYtdlp = Find-System 'yt-dlp.exe'
-    if ($sysYtdlp) {
-      $ytdlp = $sysYtdlp
-      Info 'déjà installé sur cet ordinateur'
-    } else {
-      Save-Url 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' $ytdlp 'yt-dlp (~17 Mo, source GitHub officielle)'
+    $ytBase = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/'
+    $ytZip = Join-Path $Temp 'yt-dlp_win.zip'
+    try {
+      Save-Url ($ytBase + 'yt-dlp_win.zip') $ytZip 'yt-dlp (~24 Mo, source GitHub officielle)'
+      # empreinte SHA-256 publiée à côté de l'archive
+      $sums = (Invoke-WebRequest -Uri ($ytBase + 'SHA2-256SUMS') -UseBasicParsing).Content
+      if ($sums -is [byte[]]) { $sums = [Text.Encoding]::UTF8.GetString($sums) }
+      $want = ($sums -split "`n" | Where-Object { $_ -match '^([0-9a-fA-F]{64})\s+\*?yt-dlp_win\.zip\s*$' } | Select-Object -First 1)
+      if (-not $want) { throw 'empreinte de yt-dlp_win.zip introuvable' }
+      $want = ($want -split '\s+')[0].ToLower()
+      if ((Get-FileHash -Algorithm SHA256 -LiteralPath $ytZip).Hash.ToLower() -ne $want) { throw 'empreinte différente pour yt-dlp_win.zip' }
+      $ytNew = Join-Path $Temp 'yt-dlp_win'
+      Expand-Archive -LiteralPath $ytZip -DestinationPath $ytNew -Force
+      if (-not (Test-Path (Join-Path $ytNew 'yt-dlp.exe'))) { throw 'archive yt-dlp inattendue' }
+      if (Test-Path $ytDir) { Remove-Item -Recurse -Force $ytDir }
+      Move-Item -LiteralPath $ytNew -Destination $ytDir
+      # l'ancien fichier unique d'une installation précédente ne sert plus
+      Remove-Item -Force (Join-Path $Bin 'yt-dlp.exe') -ErrorAction SilentlyContinue
+    } catch {
+      # repli : yt-dlp déjà sur l'ordinateur, sinon le fichier unique (le panneau repassera à la version dossier)
+      Info "version rapide indisponible ($($_.Exception.Message))"
+      $ytdlp = Join-Path $Bin 'yt-dlp.exe'
+      if (-not (Test-Path $ytdlp)) {
+        $sysYtdlp = Find-System 'yt-dlp.exe'
+        if ($sysYtdlp) { $ytdlp = $sysYtdlp } else { Save-Url ($ytBase + 'yt-dlp.exe') $ytdlp 'yt-dlp (~17 Mo, source GitHub officielle)' }
+      }
     }
   }
   Test-Tool 'yt-dlp' $ytdlp @('--version')

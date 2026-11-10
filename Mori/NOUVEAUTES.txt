@@ -10,6 +10,12 @@
 - Modes automatiques Audio et Chutier bien plus légers : ils ne reparcourent le projet que s'il a changé, et se mettent en pause pendant que la console est ouverte (elle s'affichait avec plusieurs secondes de retard). Redémarrez Premiere après la mise à jour.
 - Mises à jour : un paquet sans empreinte ou hébergé ailleurs que sur les Releases GitHub de la suite est refusé ; si la copie échoue en route, la version précédente est remise.
 - « Délai d'attente ExtendScript dépassé » bien plus rare : l'import, le rangement des chutiers, la relinke audio et les marqueurs laissent à Premiere le temps de répondre, un délai dépassé n'en déclenche plus d'autres, et le scan automatique du projet s'espace sur les gros projets.
+- Web (Windows) : recherche, analyse et téléchargement bien plus rapides. yt-dlp mettait 4 à 10 s à démarrer à chaque action ; le panneau installe lui-même sa version rapide au démarrage (une fois, en arrière-plan, ~0,5 s ensuite).
+- Web (Windows) : « Annuler » arrête vraiment le téléchargement (yt-dlp continuait en arrière-plan), à toutes les étapes ; fermer le panneau arrête aussi les téléchargements et conversions en cours.
+- Web : une recherche ou une analyse qui ne répond plus est abandonnée après 90 s au lieu de tourner sans fin.
+- Web : le champ de recherche n'est plus souligné par le correcteur orthographique ; sur un panneau étroit, le bouton Télécharger garde seulement son icône au lieu d'être coupé.
+- Mode automatique Vidéo allégé comme Audio et Chutier. Quand Premiere est occupé (rendu, fenêtre ouverte), le panneau attend sa réponse au lieu d'empiler les demandes.
+- Mori Console (Windows) : après Échap, la console restait parfois fermée pour de bon au lieu d'être masquée quand le panneau Mori était ouvert (curseur de chargement à la réouverture).
 
 2.12.9
 - Le panneau s'appelle « Mori — Studio » dans Fenêtre > Extensions dès l'installation (le nom choisi dans Apparence le remplace ensuite).

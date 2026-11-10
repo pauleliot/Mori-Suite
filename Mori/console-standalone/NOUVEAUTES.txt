@@ -1,3 +1,7 @@
+1.0.3
+- Mises à jour : un paquet sans empreinte ou hébergé ailleurs que sur les Releases GitHub de la suite est refusé ; si la copie échoue en route, la version précédente est remise.
+- Corrections internes partagées avec Mori 2.12.10.
+
 1.0.2
 - Mori Console : Transformation arrive bien en « Échelle uniforme » même quand le clip a déjà d'autres effets (UltraKey par exemple).
 - Rapport de diagnostic : l'état du préchargement de la console est bien lu.

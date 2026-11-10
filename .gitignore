@@ -12,6 +12,8 @@
 # Dans chaque panneau : paquets fabriqués (publiés en Releases), réglages locaux, outils de test
 dist/
 .debug
+# outils téléchargés par les installeurs ou par le panneau (FFmpeg, yt-dlp, Deno)
+/Mori/bin/
 .claude/
 __pycache__/
 *.pyc

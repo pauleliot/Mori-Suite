@@ -562,6 +562,10 @@
       // Windows : la console demande à être masquée plutôt que fermée (voir mori-hotkey.ps1)
       bridge.addEventListener('com.mori.console.hide', function () {
         consoleFocused = false;
+        // Seule la fenêtre cachée s'en charge : le panneau Mori a lui aussi son programme du raccourci, et les deux
+        // réponses se croisaient (« 1 fenêtre masquée » et « 0 ») : selon l'ordre d'arrivée, la console se fermait
+        // pour de bon au lieu de rester masquée.
+        if (!HIDDEN) return;
         try { if (child && child.stdin && child.stdin.writable) child.stdin.write('HIDE\n'); } catch (e) {}
       });
       bridge.addEventListener('com.mori.console.focus', function (ev) {

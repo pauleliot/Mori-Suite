@@ -43,7 +43,7 @@ APPS = [
 PUBLISHER = "Paul-Eliot Kostre"
 SITE = "https://pauleliot.github.io/plugins.html"
 # Mori n'a pas de build.py : son paquet est le dossier lui-même, sans ces fichiers
-MORI_SKIP = {".debug", "dist", "app.source.tsx", ".claude", "console-standalone"}
+MORI_SKIP = {".debug", "dist", "app.source.tsx", ".claude", "console-standalone", "bin"}
 # Mori Console seule : fichiers repris de Mori (la console, sa fenêtre cachée et ce qu'elles chargent)
 CONSOLE_FILES = ["console.html", "hotkey.html", "CSInterface.js", "assets/logo.png", "tools/mori-hotkey.ps1", "tools/mori-hotkey-mac.js",
                  "vendor/mori-console.js", "vendor/mori-hotkey.js", "vendor/mori-diagnostic.js", "vendor/suite-theme.js",

@@ -793,6 +793,13 @@ function wrapExtendScript(script: string): string {
 // son délai à son tour (timeouts en cascade). Garde-fou : au plus EXTENDSCRIPT_STUCK_MS de plus si rien ne revient.
 const EXTENDSCRIPT_STUCK_MS = 120000;
 let extendScriptQueue: Promise<unknown> = Promise.resolve();
+// scripts dont le délai est dépassé et auxquels Premiere n'a pas encore répondu : tant qu'il y en a, les lectures
+// de fond (scans automatiques, nom du projet, marqueurs de la timeline) n'ajoutent rien à la file
+let extendScriptStalled = 0;
+/** Premiere n'a pas répondu au dernier script dans son délai (occupé, fenêtre ouverte) et n'a toujours pas répondu */
+export function premiereStalled(): boolean {
+  return extendScriptStalled > 0;
+}
 export function evalExtendScript<T = any>(script: string, timeoutMs = 6000): Promise<T> {
   const job = extendScriptQueue.then(() => evalExtendScriptNow<T>(script, timeoutMs));
   extendScriptQueue = job.then(j => j.settled, () => {});
@@ -802,8 +809,16 @@ export function evalExtendScript<T = any>(script: string, timeoutMs = 6000): Pro
 /** result : réponse ou erreur de délai ; settled : Premiere a réellement fini (ou ne répondra plus) */
 function evalExtendScriptNow<T = any>(script: string, timeoutMs: number): { result: Promise<T>; settled: Promise<void> } {
   script = wrapExtendScript(script);
-  let settle: () => void = () => {};
-  const settled = new Promise<void>(r => { settle = r; });
+  let settleNow: () => void = () => {};
+  const settled = new Promise<void>(r => { settleNow = r; });
+  let stalled = false;
+  const settle = () => {
+    if (stalled) {
+      stalled = false;
+      extendScriptStalled--;
+    }
+    settleNow();
+  };
   const result = new Promise<T>((resolve: (v: any) => void) => {
     const cs = getCSInterface();
     if (!cs) {
@@ -816,6 +831,8 @@ function evalExtendScriptNow<T = any>(script: string, timeoutMs: number): { resu
     const timeout = setTimeout(() => {
       if (resolved) return;
       resolved = true;
+      stalled = true;
+      extendScriptStalled++;
       stuckTimer = setTimeout(settle, EXTENDSCRIPT_STUCK_MS);
       resolve({
         success: false,
@@ -900,7 +917,7 @@ export function readProjectSignature(): Promise<{ success: boolean; key?: string
 // ne prévenant pas toujours.
 let scanPauseUntil = 0;
 export function autoScanPaused(): boolean {
-  return Date.now() < scanPauseUntil;
+  return Date.now() < scanPauseUntil || premiereStalled();
 }
 (function listenConsole() {
   const cep = typeof window !== 'undefined' ? (window as any).__adobe_cep__ : null;
@@ -2698,10 +2715,54 @@ function toolEnv(): any {
   return { ...env, ...certs, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' };
 }
 
-function runProcess(bin: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+// Programmes lancés par le panneau et encore en vie : arrêtés avec lui (fermeture du panneau ou de Premiere),
+// sinon un téléchargement ou une conversion continuerait seul en arrière-plan
+const liveChildren = new Set<any>();
+function trackChild(child: any) {
+  liveChildren.add(child);
+  const drop = () => liveChildren.delete(child);
+  child.on('close', drop);
+  child.on('error', drop);
+  return child;
+}
+/**
+ * Arrête un programme et ceux qu'il a lancés. Sous Windows, yt-dlp.exe est un lanceur : le vrai yt-dlp (et son
+ * FFmpeg) est un processus enfant, que kill() laissait tourner — « Annuler » n'arrêtait pas le téléchargement.
+ */
+export function killProcessTree(child: any) {
+  if (!child || child.exitCode !== null || child.killed) return;
+  try {
+    if (isWindowsPlatform() && child.pid) {
+      nodeRequire('child_process')
+        .spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+        .on('error', () => {
+          try {
+            child.kill();
+          } catch {}
+        });
+    } else child.kill();
+  } catch {}
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('unload', () => liveChildren.forEach((c) => killProcessTree(c)));
+}
+
+/** timeoutMs : au-delà, le programme est arrêté et l'appel échoue (réseau figé, lecteur débranché…) ; 0 = sans limite */
+function runProcess(bin: string, args: string[], timeoutMs = 0): Promise<{ code: number; stdout: string; stderr: string }> {
   const cp = nodeRequire('child_process');
   return new Promise((resolve, reject) => {
-    const child = cp.spawn(bin, args, { windowsHide: true, env: toolEnv() });
+    const child = trackChild(cp.spawn(bin, args, { windowsHide: true, env: toolEnv() }));
+    let timedOut = false;
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          killProcessTree(child);
+          reject(new Error(`pas de réponse en ${Math.round(timeoutMs / 1000)} s`));
+        }, timeoutMs)
+      : null;
+    const clear = () => timer && clearTimeout(timer);
+    child.on('close', clear);
+    child.on('error', clear);
     // décodage UTF-8 qui gère les caractères coupés entre deux blocs
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
@@ -2710,7 +2771,7 @@ function runProcess(bin: string, args: string[]): Promise<{ code: number; stdout
     child.stdout.on('data', (d: any) => (stdout += d.toString()));
     child.stderr.on('data', (d: any) => (stderr += d.toString()));
     child.on('error', reject);
-    child.on('close', (code: number) => resolve({ code, stdout, stderr }));
+    child.on('close', (code: number) => !timedOut && resolve({ code, stdout, stderr }));
   });
 }
 
@@ -2951,7 +3012,7 @@ export function runFfmpegConversion(
   onProgress: (ratio: number) => void
 ): RunningConversion {
   const cp = nodeRequire('child_process');
-  const child = cp.spawn(tools.ffmpeg, args, { windowsHide: true });
+  const child = trackChild(cp.spawn(tools.ffmpeg, args, { windowsHide: true }));
   let canceled = false;
   let stderrTail = '';
   const promise = new Promise<void>((resolve, reject) => {
@@ -3116,6 +3177,10 @@ export function setCustomDownloadDir(dir: string) {
 }
 
 /** Recherche yt-dlp : copie embarquée (bin/) > chemin choisi > installation système (PATH, winget, Homebrew) */
+/** yt-dlp vient d'être installé ou remplacé (vendor/mori-tools-*.js) : il est recherché de nouveau */
+export function forgetYtdlp() {
+  ytdlpCache = null;
+}
 export function findYtdlp(): string | null {
   if (ytdlpCache) return ytdlpCache;
   ytdlpCache = searchYtdlp();
@@ -3130,6 +3195,12 @@ function searchYtdlp(): string | null {
   const win = isWindowsPlatform();
   const exe = win ? '.exe' : '';
 
+  // Windows : version « dossier » posée par vendor/mori-tools-win.js (démarre en ~0,5 s, contre 4 à 10 s pour le
+  // fichier unique, que l'antivirus réanalyse à chaque lancement)
+  if (win) {
+    const folder = pathMod.join(extensionRoot(), 'bin', 'win', 'yt-dlp_win', 'yt-dlp.exe');
+    if (fs.existsSync(folder)) return folder;
+  }
   const embedded = pathMod.join(extensionRoot(), 'bin', win ? 'win' : 'mac', 'yt-dlp' + exe);
   if (fs.existsSync(embedded)) return embedded;
   const custom = getCustomYtdlpPath();
@@ -3164,6 +3235,8 @@ function bundledDenoArgs(): string[] {
 // vidéo déjà vue ou la survoler avant de cliquer ne relance rien. Les adresses de flux de YouTube restent valables
 // plusieurs heures.
 const ONLINE_CACHE_MS = 20 * 60 * 1000;
+// lecture d'une page ou recherche : au-delà, yt-dlp est arrêté (réseau figé) au lieu de laisser le panneau attendre
+const YTDLP_READ_TIMEOUT_MS = 90 * 1000;
 // H.264 d'abord : le navigateur intégré de Premiere ne lit pas toujours l'AV1 ou le VP9
 const PREVIEW_FORMAT = 'bv*[height<=360][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=360][ext=mp4]+ba[ext=m4a]/bv*[height<=360]+ba/b[height<=480]/b/b*';
 interface OnlineMedia { info: OnlineMediaInfo; streams: { video: string; audio?: string } | null }
@@ -3171,10 +3244,10 @@ const onlineCache = new Map<string, { at: number; promise: Promise<OnlineMedia> 
 let prefetchRunning = 0;
 
 async function extractOnlineMedia(ytdlp: string, url: string): Promise<OnlineMedia> {
-  const base = ['-J', '--no-playlist', '--no-warnings', '--encoding', 'utf-8', ...bundledDenoArgs()];
-  let res = await runProcess(ytdlp, [...base, '-f', PREVIEW_FORMAT, '--', url]);
+  const base = ['-J', '--no-playlist', '--no-warnings', '--socket-timeout', '20', '--encoding', 'utf-8', ...bundledDenoArgs()];
+  let res = await runProcess(ytdlp, [...base, '-f', PREVIEW_FORMAT, '--', url], YTDLP_READ_TIMEOUT_MS);
   // aucun format d'aperçu sur ce site : les métadonnées restent lisibles sans sélection de format
-  if (res.code !== 0 && /Requested format is not available/i.test(res.stderr)) res = await runProcess(ytdlp, [...base, '--', url]);
+  if (res.code !== 0 && /Requested format is not available/i.test(res.stderr)) res = await runProcess(ytdlp, [...base, '--', url], YTDLP_READ_TIMEOUT_MS);
   if (res.code !== 0) {
     const last = res.stderr.trim().split(/\r?\n/).pop() || '';
     throw new Error(last.replace(/^ERROR:\s*/, '') || 'lien illisible');
@@ -3259,7 +3332,11 @@ export function searchYoutube(ytdlp: string, query: string, count: number): Prom
 }
 async function searchYoutubeNow(ytdlp: string, query: string, count: number): Promise<YoutubeSearchResult[]> {
   const n = Math.max(1, Math.min(50, Math.round(count) || 10));
-  const res = await runProcess(ytdlp, ['-J', '--flat-playlist', '--no-warnings', '--encoding', 'utf-8', ...bundledDenoArgs(), '--', `ytsearch${n}:${query}`]);
+  const res = await runProcess(
+    ytdlp,
+    ['-J', '--flat-playlist', '--no-warnings', '--socket-timeout', '20', '--encoding', 'utf-8', ...bundledDenoArgs(), '--', `ytsearch${n}:${query}`],
+    YTDLP_READ_TIMEOUT_MS
+  );
   if (res.code !== 0) {
     const last = res.stderr.trim().split(/\r?\n/).pop() || '';
     throw new Error(last.replace(/^ERROR:\s*/, '') || 'recherche impossible');
@@ -3292,7 +3369,7 @@ export async function fetchPreviewStreams(ytdlp: string, url: string): Promise<{
 /** Version de yt-dlp (« 2026.10.26 »), vide si illisible */
 export async function readYtdlpVersion(ytdlp: string): Promise<string> {
   try {
-    const res = await runProcess(ytdlp, ['--version']);
+    const res = await runProcess(ytdlp, ['--version'], 120000);
     return res.code === 0 ? res.stdout.trim().split(/\r?\n/)[0] || '' : '';
   } catch {
     return '';
@@ -3305,12 +3382,13 @@ export async function readYtdlpVersion(ytdlp: string): Promise<string> {
  * Ailleurs : mise à jour intégrée de yt-dlp (« -U »), qui dit elle-même quand elle ne s'applique pas (Homebrew, winget…).
  */
 export async function updateYtdlp(ytdlp: string): Promise<string> {
-  const mac = (window as any).MoriToolsMac;
-  if (!isWindowsPlatform() && mac && typeof mac.updateYtdlp === 'function' && mac.ownsYtdlp(ytdlp)) {
+  // copie de Mori en version dossier (Mac comme Windows) : pas de « -U », le module d'outils la retélécharge
+  const mac = isWindowsPlatform() ? (window as any).MoriToolsWin : (window as any).MoriToolsMac;
+  if (mac && typeof mac.updateYtdlp === 'function' && mac.ownsYtdlp(ytdlp)) {
     const r = await mac.updateYtdlp();
     return r.updated ? `yt-dlp mis à jour : ${r.version}` : `yt-dlp est déjà à jour (${r.version})`;
   }
-  const res = await runProcess(ytdlp, ['-U']);
+  const res = await runProcess(ytdlp, ['-U'], 5 * 60 * 1000);
   const lines = (res.stdout + '\n' + res.stderr).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const last = (lines.pop() || '').replace(/^ERROR:\s*/, '');
   if (res.code !== 0) throw new Error(last || 'mise à jour impossible');
@@ -4014,7 +4092,7 @@ export interface RunningDownload {
 /** Lance yt-dlp ; progression 0..1 par étape (vidéo puis audio), résout avec le chemin du fichier final */
 export function runYtdlp(ytdlp: string, args: string[], onProgress: (ratio: number, step: number) => void): RunningDownload {
   const cp = nodeRequire('child_process');
-  const child = cp.spawn(ytdlp, args, { windowsHide: true, env: toolEnv() });
+  const child = trackChild(cp.spawn(ytdlp, args, { windowsHide: true, env: toolEnv() }));
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   let canceled = false;
@@ -4076,9 +4154,7 @@ export function runYtdlp(ytdlp: string, args: string[], onProgress: (ratio: numb
     promise,
     cancel: () => {
       canceled = true;
-      try {
-        child.kill();
-      } catch {}
+      killProcessTree(child);
     },
   };
 }
@@ -4906,6 +4982,8 @@ export const VideoTranscoder: React.FC = () => {
   const [scanSummary, setScanSummary] = useState<{ message: string; isError?: boolean } | null>(null);
   // cadence déjà analysée par fichier (true = variable) : le scan auto ne réanalyse que les nouveaux clips
   const vfrCacheRef = useRef<Map<string, boolean>>(new Map());
+  // signature du projet au dernier parcours complet (scan automatique léger)
+  const vfrLastFullRef = useRef<{ key: string; at: number }>({ key: '', at: 0 });
   const scanningRef = useRef(false);
   const jobsRef = useRef<VideoJob[]>([]);
   jobsRef.current = jobs;
@@ -5069,7 +5147,17 @@ export const VideoTranscoder: React.FC = () => {
     let cancelled = false;
     let timer: any = null;
     const loop = async () => {
-      await scanProjectForVFR(false);
+      try {
+        // console ouverte, Premiere occupé, ou projet inchangé depuis le dernier parcours complet : rien à refaire
+        if (!autoScanPaused()) {
+          const sig = await readProjectSignature();
+          const last = vfrLastFullRef.current;
+          if (!cancelled && !(sig?.success && sig.key === last.key && Date.now() - last.at < AUTO_FULL_SCAN_EVERY_MS)) {
+            await scanProjectForVFR(false);
+            if (sig?.success) vfrLastFullRef.current = { key: sig.key as string, at: Date.now() };
+          }
+        }
+      } catch {}
       if (!cancelled) timer = setTimeout(loop, VFR_SCAN_INTERVAL_MS);
     };
     loop();
@@ -5357,6 +5445,39 @@ export const WebDownloader: React.FC = () => {
   useEffect(() => writeSetting('cutflow.webSearchCount', searchCount), [searchCount]);
   // Trim : ne télécharger qu'un passage (début / fin), repérable avec l'aperçu
   const [trimOn, setTrimOn] = useState(false);
+  // Ligne Télécharger : si le panneau est trop étroit pour le libellé, le bouton garde seulement son icône
+  // (libellé en infobulle) ; la ligne ne passe jamais à la ligne
+  const [compactDownload, setCompactDownload] = useState(false);
+  const downloadRowObserver = useRef<ResizeObserver | null>(null);
+  const measureDownloadRow = useRef<(() => void) | null>(null);
+  const measureCanvas = useRef<CanvasRenderingContext2D | null>(null);
+  const downloadRowRef = React.useCallback((row: HTMLDivElement | null) => {
+    downloadRowObserver.current?.disconnect();
+    downloadRowObserver.current = null;
+    measureDownloadRow.current = null;
+    if (!row) return;
+    const measure = () => {
+      const kids = Array.from(row.children) as HTMLElement[];
+      const button = kids[kids.length - 1];
+      if (!button) return;
+      const others = kids.slice(0, -1).reduce((w, el) => w + el.offsetWidth, 0) + 6 * (kids.length - 1);
+      // place du bouton avec son libellé : texte mesuré dans la police du bouton + icône, écart et marges
+      const css = getComputedStyle(button);
+      const ctx = (measureCanvas.current = measureCanvas.current || document.createElement('canvas').getContext('2d'));
+      let text = 0;
+      if (ctx) {
+        ctx.font = `${css.fontWeight} ${css.fontSize} ${css.fontFamily}`;
+        text = ctx.measureText(row.getAttribute('data-label') || '').width;
+      }
+      setCompactDownload(row.clientWidth - others < text + 14 + 8 + 24 + 4);
+    };
+    measureDownloadRow.current = measure;
+    if (typeof ResizeObserver !== 'undefined') {
+      downloadRowObserver.current = new ResizeObserver(measure);
+      downloadRowObserver.current.observe(row);
+    }
+    measure();
+  }, []);
   const [trimStart, setTrimStart] = useState('');
   const [trimEnd, setTrimEnd] = useState('');
   const previewTimeRef = useRef<{ url: string; time: number } | null>(null);
@@ -5368,6 +5489,8 @@ export const WebDownloader: React.FC = () => {
 
   // téléchargements en cours : de quoi annuler chacun, ceux déjà lancés, et leur nombre
   const cancelsRef = useRef(new Map<string, () => void>());
+  // annulations demandées : vues aussi entre deux étapes (attente avant un nouvel essai, analyse, avant l'import)
+  const canceledIdsRef = useRef(new Set<string>());
   const startedRef = useRef(new Set<string>());
   const activeCountRef = useRef(0);
   const settingsRef = useRef({ autoImport });
@@ -5378,6 +5501,13 @@ export const WebDownloader: React.FC = () => {
     setYtdlp(findYtdlp());
     setFfmpegTools(findFfmpegTools());
     resolveDownloadDir().then(setDownloadDir).catch(() => {});
+    // yt-dlp installé ou remplacé en arrière-plan (version rapide) : pris en compte sans redémarrer
+    const onTools = () => {
+      forgetYtdlp();
+      setYtdlp(findYtdlp());
+    };
+    window.addEventListener('mori-tools-changed', onTools);
+    return () => window.removeEventListener('mori-tools-changed', onTools);
   }, [nodeOk]);
   useEffect(() => writeSetting(WEB_SETTINGS_KEYS.format, format), [format]);
   useEffect(() => writeSetting(WEB_SETTINGS_KEYS.maxHeight, maxHeight), [maxHeight]);
@@ -5499,6 +5629,9 @@ export const WebDownloader: React.FC = () => {
   const processJob = async (job: DownloadJob) => {
     if (!ytdlp) return;
     let output = '';
+    const stopIfCanceled = () => {
+      if (canceledIdsRef.current.has(job.id)) throw new Error('annulé');
+    };
     try {
       const dir = downloadDir || (await resolveDownloadDir());
       // YouTube refuse parfois ses propres liens (HTTP 403) : on relance l'extraction pour en obtenir de nouveaux
@@ -5520,10 +5653,13 @@ export const WebDownloader: React.FC = () => {
           break;
         } catch (err: any) {
           if (err?.message === 'annulé' || !/403|Forbidden/i.test(err?.message || '') || attempt >= MAX_ATTEMPTS) throw err;
+          cancelsRef.current.delete(job.id);
           await new Promise((r) => setTimeout(r, 1500 * attempt));
+          stopIfCanceled();
         }
       }
       cancelsRef.current.delete(job.id);
+      stopIfCanceled();
 
       // Vidéo hors H.264/HEVC (VP9/AV1 en 4K) ou à cadence variable : réencodage pour Premiere
       if (job.format === 'video' && ffmpegTools) {
@@ -5548,6 +5684,7 @@ export const WebDownloader: React.FC = () => {
         }
       }
 
+      stopIfCanceled();
       if (settingsRef.current.autoImport && isRunningInPremiere()) {
         updateJob(job.id, { status: 'importing', message: 'Import dans Premiere…' });
         const res = await importIntoActiveBin(output);
@@ -5563,6 +5700,8 @@ export const WebDownloader: React.FC = () => {
         status: canceled ? 'canceled' : 'error',
         message: canceled ? 'Téléchargement annulé' : `Échec : ${err?.message || err}`,
       });
+    } finally {
+      canceledIdsRef.current.delete(job.id);
     }
   };
 
@@ -5584,9 +5723,13 @@ export const WebDownloader: React.FC = () => {
   }, [jobs, ytdlp]);
 
   const cancelJob = (job: DownloadJob) => {
-    const cancel = cancelsRef.current.get(job.id);
-    if (cancel) cancel();
-    else if (job.status === 'queued') updateJob(job.id, { status: 'canceled', message: 'Retiré de la file' });
+    if (job.status === 'queued' && !startedRef.current.has(job.id)) {
+      updateJob(job.id, { status: 'canceled', message: 'Retiré de la file' });
+      return;
+    }
+    if (job.status === 'importing') return; // Premiere est déjà en train d'importer le fichier
+    canceledIdsRef.current.add(job.id);
+    cancelsRef.current.get(job.id)?.();
   };
 
   const handleChooseYtdlp = () => {
@@ -5618,7 +5761,7 @@ export const WebDownloader: React.FC = () => {
   const specKey = (s: WavSpec) => `${s.sampleRate}-${s.bitDepth}`;
   const currentWav = WAV_SPECS.find((s) => specKey(s) === wavKey) || { sampleRate: 48000, bitDepth: 24 };
   const selectClass =
-    'bg-zinc-950 border border-white/10 rounded-full px-2.5 py-1.5 text-[11px] font-semibold text-zinc-200 focus:outline-none focus:border-emerald-400 cursor-pointer';
+    'min-w-0 bg-zinc-950 border border-white/10 rounded-full px-2.5 py-1.5 text-[11px] font-semibold text-zinc-200 focus:outline-none focus:border-emerald-400 cursor-pointer';
 
   // passage à télécharger : début vide = 0, fin vide = fin de la vidéo
   const trim = (() => {
@@ -5632,11 +5775,15 @@ export const WebDownloader: React.FC = () => {
     else if (dur && end > dur + 0.5) error = `La vidéo dure ${formatClock(dur)}`;
     return { start, end, valid: !error, error };
   })();
+  React.useLayoutEffect(() => {
+    measureDownloadRow.current?.();
+  }, [trimOn, format, maxHeight, wavKey]);
   const previewTimeFor = (url: string) => (previewTimeRef.current && previewTimeRef.current.url === url ? previewTimeRef.current.time : null);
 
+  const downloadLabel = trimOn ? 'Télécharger l’extrait' : 'Télécharger';
   const downloadControls = (
     <div className="space-y-1.5">
-      <div className="flex items-center gap-1.5">
+      <div ref={downloadRowRef} data-label={downloadLabel} className="flex items-center gap-1.5">
         <select
           value={format}
           onChange={(e) => setFormat(e.target.value as DownloadFormat)}
@@ -5673,9 +5820,14 @@ export const WebDownloader: React.FC = () => {
         >
           <Scissors className="w-3.5 h-3.5" />
         </button>
-        <PrimaryButton onClick={handleDownload} disabled={trimOn && !trim.valid} className="flex-1 !px-3">
-          <Download className="w-3.5 h-3.5" />
-          {trimOn ? 'Télécharger l’extrait' : 'Télécharger'}
+        <PrimaryButton
+          onClick={handleDownload}
+          disabled={trimOn && !trim.valid}
+          title={compactDownload ? downloadLabel : undefined}
+          className="flex-1 min-w-[2.75rem] !px-3 whitespace-nowrap"
+        >
+          <Download className="w-3.5 h-3.5 flex-shrink-0" />
+          {!compactDownload && <span className="truncate">{downloadLabel}</span>}
         </PrimaryButton>
       </div>
       {trimOn && info && (
@@ -5706,6 +5858,8 @@ export const WebDownloader: React.FC = () => {
                 </div>
                 <input
                   type="text"
+                  spellCheck={false}
+                  autoComplete="off"
                   value={f.value}
                   onChange={(e) => f.set(e.target.value)}
                   placeholder={f.placeholder}
@@ -5746,6 +5900,10 @@ export const WebDownloader: React.FC = () => {
         <div className="flex gap-1.5">
           <input
             type="text"
+            spellCheck={false}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
             value={url}
             disabled={!ready}
             onChange={(e) => {
@@ -10446,7 +10604,7 @@ export const ReviewMarkersHub: React.FC<ReviewMarkersHubProps> = ({ currentFrame
       const w = writesRef.current;
       const base = latestRef.current;
       // panneau masqué (autre onglet du groupe, fenêtre réduite) : Premiere n'est pas interrogé pour rien
-      if (busy || document.hidden || base.markers.length === 0 || w.active > 0) return;
+      if (busy || document.hidden || base.markers.length === 0 || w.active > 0 || autoScanPaused()) return;
       const withClips = needsClips(base.markers, base.placeOn);
       tick++;
       if (withClips && tick % 3 !== 0) return;
@@ -11521,10 +11679,18 @@ export default function App() {
   // Nom du projet ouvert, relu régulièrement pour suivre un changement de projet
   useEffect(() => {
     if (!isRunningInPremiere()) return;
-    const refresh = () =>
+    // une seule lecture à la fois : quand Premiere tarde à répondre, elles ne s'empilent pas dans la file
+    let reading = false;
+    const refresh = () => {
+      if (reading || autoScanPaused()) return;
+      reading = true;
       evalExtendScript<any>('JSON.stringify({ success: true, name: app.project ? app.project.name : "" })')
-        .then((res) => setCurrentProjectName(String(res?.name || '')))
-        .catch(() => {});
+        .then((res) => res && res.success !== false && setCurrentProjectName(String(res?.name || '')))
+        .catch(() => {})
+        .then(() => {
+          reading = false;
+        });
+    };
     refresh();
     // panneau masqué : pas de question à Premiere ; relu dès qu'il réapparaît
     const timer = setInterval(() => !document.hidden && refresh(), 5000);
