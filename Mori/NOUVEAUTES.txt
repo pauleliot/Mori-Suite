@@ -2,6 +2,7 @@
 - Web (Mac) : recherche, aperçu et téléchargement bien plus rapides (yt-dlp démarrait en ~10 s à chaque action, maintenant ~0,3 s). Relancez l'installeur Mac pour en profiter.
 - Web (Mac) : ✂ Trim fonctionne (FFmpeg refusait la connexion sécurisée à YouTube).
 - Installeur Mac : FFmpeg et Deno installés en version Intel par un ancien installeur sont remplacés par la version Apple Silicon.
+- « Délai d'attente ExtendScript dépassé » bien plus rare : l'import, le rangement des chutiers, la relinke audio et les marqueurs laissent à Premiere le temps de répondre, un délai dépassé n'en déclenche plus d'autres, et le scan automatique du projet s'espace sur les gros projets.
 
 2.12.9
 - Le panneau s'appelle « Mori — Studio » dans Fenêtre > Extensions dès l'installation (le nom choisi dans Apparence le remplace ensuite).

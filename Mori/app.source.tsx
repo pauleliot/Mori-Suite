@@ -787,95 +787,86 @@ function wrapExtendScript(script: string): string {
  * avec timeout pour ne jamais bloquer l'UI
  */
 // Les appels ExtendScript sont exécutés un par un : avec plusieurs scans auto en parallèle,
-// le délai d'attente ne doit courir qu'une fois le script réellement envoyé à Premiere
+// le délai d'attente ne doit courir qu'une fois le script réellement envoyé à Premiere.
+// Premiere n'exécute lui aussi qu'un script à la fois (tous panneaux confondus) : après un délai dépassé, le script
+// suivant n'est envoyé qu'à la vraie réponse de Premiere, sinon il attendrait derrière le précédent et dépasserait
+// son délai à son tour (timeouts en cascade). Garde-fou : au plus EXTENDSCRIPT_STUCK_MS de plus si rien ne revient.
+const EXTENDSCRIPT_STUCK_MS = 120000;
 let extendScriptQueue: Promise<unknown> = Promise.resolve();
 export function evalExtendScript<T = any>(script: string, timeoutMs = 6000): Promise<T> {
-  const run = () => evalExtendScriptNow<T>(script, timeoutMs);
-  const result = extendScriptQueue.then(run, run);
-  extendScriptQueue = result.catch(() => {});
-  return result;
+  const job = extendScriptQueue.then(() => evalExtendScriptNow<T>(script, timeoutMs));
+  extendScriptQueue = job.then(j => j.settled, () => {});
+  return job.then(j => j.result);
 }
 
-function evalExtendScriptNow<T = any>(script: string, timeoutMs: number): Promise<T> {
+/** result : réponse ou erreur de délai ; settled : Premiere a réellement fini (ou ne répondra plus) */
+function evalExtendScriptNow<T = any>(script: string, timeoutMs: number): { result: Promise<T>; settled: Promise<void> } {
   script = wrapExtendScript(script);
-  return new Promise((resolve) => {
+  let settle: () => void = () => {};
+  const settled = new Promise<void>(r => { settle = r; });
+  const result = new Promise<T>((resolve: (v: any) => void) => {
     const cs = getCSInterface();
     if (!cs) {
-      return resolve({
-        success: false,
-        error: "L'application est hors panneau Premiere Pro.",
-      } as any);
+      settle();
+      return resolve({ success: false, error: "L'application est hors panneau Premiere Pro." });
     }
-
+    const startedAt = Date.now();
     let resolved = false;
+    let stuckTimer: any = null;
     const timeout = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        resolve({
-          success: false,
-          error: "Délai d'attente ExtendScript dépassé (Timeout)",
-        } as any);
-      }
+      if (resolved) return;
+      resolved = true;
+      stuckTimer = setTimeout(settle, EXTENDSCRIPT_STUCK_MS);
+      resolve({
+        success: false,
+        error: `Premiere Pro n'a pas répondu en ${Math.round(timeoutMs / 1000)} s (occupé : import, rendu, fenêtre ouverte ou projet très lourd). Réessayez dans un instant. (Timeout ExtendScript)`
+      });
     }, timeoutMs);
-
     try {
       cs.evalScript(script, (rawResult: string) => {
-        if (resolved) return;
+        settle();
+        if (resolved) {
+          // réponse arrivée après le délai : la durée réelle aide à régler le délai de l'action
+          if (stuckTimer) clearTimeout(stuckTimer);
+          console.warn(`[Mori] ExtendScript : réponse tardive après ${Date.now() - startedAt} ms (délai ${timeoutMs} ms)`);
+          return;
+        }
         resolved = true;
         clearTimeout(timeout);
-
         if (typeof rawResult === 'string' && rawResult.indexOf('CF_ERR:') === 0) {
           console.error('[CutFlow] ExtendScript:', rawResult);
-          return resolve({
-            success: false,
-            error: 'ExtendScript : ' + rawResult.substring(7),
-          } as any);
+          return resolve({ success: false, error: 'ExtendScript : ' + rawResult.substring(7) });
         }
         if (!rawResult || rawResult === 'EvalScript error.' || rawResult === 'undefined') {
           console.error('[CutFlow] ExtendScript résultat brut :', rawResult);
           return resolve({
             success: false,
-            error: "Erreur d'exécution ExtendScript dans Premiere Pro (réponse : " + String(rawResult) + ')',
-          } as any);
+            error: "Erreur d'exécution ExtendScript dans Premiere Pro (réponse : " + String(rawResult) + ')'
+          });
         }
-
         try {
-          const parsed = JSON.parse(rawResult);
-          resolve(parsed);
+          resolve(JSON.parse(rawResult));
         } catch {
-          resolve({ success: true, data: rawResult } as any);
+          resolve({ success: true, data: rawResult });
         }
       });
     } catch (err: any) {
+      settle();
       if (resolved) return;
       resolved = true;
       clearTimeout(timeout);
-      resolve({
-        success: false,
-        error: err?.message || 'Erreur inconnue CSInterface',
-      } as any);
+      resolve({ success: false, error: err?.message || 'Erreur inconnue CSInterface' });
     }
   });
+  return { result, settled };
 }
 
-export interface PremiereProjectScanResult {
-  success: boolean;
-  hasProject: boolean;
-  projectName: string;
-  totalItems: number;
-  compressedAudioCount: number;
-  unclassifiedMediaCount: number;
-  compressedAudios: Array<{
-    name: string;
-    mediaPath: string;
-    nodeId: string;
-  }>;
-  rootItems: Array<{
-    name: string;
-    mediaPath: string;
-    type: string;
-  }>;
-  error?: string;
+// Durée du dernier parcours du projet (attente dans la file comprise) : sur un gros projet ou un Premiere chargé,
+// les scans automatiques s'espacent au lieu d'occuper ExtendScript en continu
+let lastProjectScanMs = 0;
+/** Pause avant le prochain scan automatique : 3,5 s, ou 5 fois la durée du dernier scan (1 min au plus) */
+export function autoScanDelayMs(): number {
+  return Math.min(60000, Math.max(3500, lastProjectScanMs * 5));
 }
 
 /**
@@ -947,7 +938,10 @@ export async function scanPremiereProjectMemory(): Promise<PremiereProjectScanRe
     })();
   `;
 
-  return evalExtendScript<PremiereProjectScanResult>(script);
+  const startedAt = Date.now();
+  const res = await evalExtendScript<PremiereProjectScanResult>(script, 20000);
+  lastProjectScanMs = Date.now() - startedAt;
+  return res;
 }
 
 /**
@@ -1233,7 +1227,7 @@ export async function executeDirectAutoBinningInPremiere(rules: BinRule[]): Prom
     })();
   `;
 
-  return evalExtendScript(script);
+  return evalExtendScript(script, 120000);
 }
 
 /** Résumé lisible d'un tri : "3 rangé(s) : 1 musique, 2 SFX — chutier supprimé : 02_SON_SEUL_TOURNAGE" */
@@ -1665,7 +1659,7 @@ export async function selectProjectItemsInPremiere(ids: string[]): Promise<{ suc
       }
     })();
   `;
-  return evalExtendScript(script);
+  return evalExtendScript(script, 20000);
 }
 /**
  * Lance le remplacement direct dans Premiere Pro des pistes audio compressées par leur version WAV
@@ -1790,7 +1784,7 @@ export async function executeDirectAudioRelinkInPremiere(preferredSuffix: string
     })();
   `;
 
-  return evalExtendScript(script);
+  return evalExtendScript(script, 120000);
 }
 
 /**
@@ -2037,7 +2031,7 @@ ${MARKER_HELPERS}
     })();
   `;
 
-  return evalExtendScript(script);
+  return evalExtendScript(script, 60000);
 }
 
 /**
@@ -2075,7 +2069,7 @@ ${MARKER_HELPERS}
       }
     })();
   `;
-  return evalExtendScript(script);
+  return evalExtendScript(script, 60000);
 }
 
 const RESOLVED_PREFIX = '[RÉSOLU] ';
@@ -2140,7 +2134,7 @@ ${MARKER_HELPERS}
       }
     })();
   `;
-  return evalExtendScript(script);
+  return evalExtendScript(script, 20000);
 }
 
 /**
@@ -2179,7 +2173,7 @@ export async function shiftSequenceMarkersAfterPlayhead(delta: number): Promise<
       }
     })();
   `;
-  return evalExtendScript(script);
+  return evalExtendScript(script, 60000);
 }
 
 /**
@@ -2458,7 +2452,7 @@ ${MARKER_HELPERS}
     })();
   `;
 
-  return evalExtendScript(script);
+  return evalExtendScript(script, 60000);
 }
 
 
@@ -2836,7 +2830,7 @@ export async function listProjectVideoItems(): Promise<ProjectVideoItem[]> {
         return JSON.stringify({ success: false, error: err.toString() });
       }
     })();
-  `);
+  `, 30000);
   if (!res?.success) throw new Error(res?.error || 'Lecture du projet impossible');
   return res.items;
 }
@@ -2864,7 +2858,7 @@ export async function relinkProjectItemToFile(nodeId: string, newPath: string): 
         return JSON.stringify({ success: false, error: err.toString() });
       }
     })();
-  `);
+  `, 60000);
 }
 
 export function buildFfmpegArgs(input: string, output: string, plan: ConversionPlan, probe: MediaProbe): string[] {
@@ -2966,7 +2960,7 @@ export async function importIntoActiveBin(filePath: string): Promise<{ success: 
       }
     })();
   `;
-  return evalExtendScript(script);
+  return evalExtendScript(script, 180000);
 }
 
 /** Chemins locaux des fichiers glissés dans le panneau (File.path, sinon liste d'URI file://) */
@@ -4421,7 +4415,7 @@ export const AudioConverter: React.FC<AudioConverterProps> = ({
         setIsScanning(false);
         isLoopRunningRef.current = false;
         if (!isCancelled && autoScanActive) {
-          timerId = setTimeout(runAudioLoop, 3500);
+          timerId = setTimeout(runAudioLoop, autoScanDelayMs());
         }
       }
     };
@@ -4602,7 +4596,7 @@ export const AutoBinning: React.FC<AutoBinningProps> = ({ rules, onOpenSettings 
         setIsScanning(false);
         isLoopRunningRef.current = false;
         if (!isCancelled && autoScanActive) {
-          timerId = setTimeout(runLoop, 3500);
+          timerId = setTimeout(runLoop, autoScanDelayMs());
         }
       }
     };
