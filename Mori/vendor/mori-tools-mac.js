@@ -119,11 +119,16 @@
   }
 
   // ==================== yt-dlp : fichier unique → version dossier ====================
+  var LAUNCHER = path.join(BIN, 'yt-dlp'), FOLDER = path.join(BIN, 'yt-dlp_macos');
   function upgradeYtdlp() {
-    var launcher = path.join(BIN, 'yt-dlp'), folder = path.join(BIN, 'yt-dlp_macos');
-    var k = kind(launcher);
+    var k = kind(LAUNCHER);
     if (k !== 'arm64' && k !== 'intel' && k !== 'universel') return Promise.resolve(false); // absent, ou déjà le script
     log('yt-dlp : fichier unique (lent à démarrer), passage à la version dossier…');
+    return installYtdlp();
+  }
+  /** Télécharge la dernière version dossier, la vérifie, la met en place et la lance une fois ; résout sa version */
+  function installYtdlp() {
+    var launcher = LAUNCHER, folder = FOLDER;
     return fetchZip(YT + 'yt-dlp_macos.zip', function () { return { url: YT + 'SHA2-256SUMS', name: 'yt-dlp_macos.zip' }; }, 'yt-dlp').then(function (dir) {
       var exe = path.join(dir, 'yt-dlp_macos');
       if (kind(exe) === 'absent') { rm(dir); throw new Error('archive yt-dlp inattendue'); }
@@ -138,10 +143,44 @@
       return new Promise(function (resolve) {
         cp.execFile(launcher, ['--version'], { timeout: 120000 }, function (err, out) {
           log(err ? 'yt-dlp installé, premier lancement en échec : ' + (err.message || err) : 'yt-dlp ' + String(out).trim() + ' en version dossier');
-          resolve(true);
+          resolve(err ? '' : String(out).trim());
         });
       });
     });
+  }
+
+  function ytdlpVersion() {
+    return new Promise(function (resolve) {
+      cp.execFile(LAUNCHER, ['--version'], { timeout: 120000 }, function (err, out) { resolve(err ? '' : String(out).trim()); });
+    });
+  }
+  /** Le yt-dlp utilisé par le panneau est-il la copie de Mori (bin/mac) ? Sinon (Homebrew…), ce module n'y touche pas */
+  function ownsYtdlp(file) {
+    try { return fs.realpathSync(String(file)) === fs.realpathSync(LAUNCHER); } catch (e) { return false; }
+  }
+  /**
+   * Bouton « Mettre à jour yt-dlp » : la version dossier n'a pas de mise à jour intégrée (-U). La dernière version
+   * publiée se lit dans l'adresse où mène …/releases/latest ; si elle diffère, l'archive est retéléchargée.
+   * Résout { updated, version }.
+   */
+  function updateYtdlp() {
+    try {
+      if (Date.now() - fs.statSync(LOCK).mtimeMs < 30 * 60 * 1000) return Promise.reject(new Error('une remise à niveau des outils est déjà en cours'));
+    } catch (e) {}
+    var k = kind(LAUNCHER);
+    if (k === 'absent') return Promise.reject(new Error('yt-dlp de Mori introuvable'));
+    var unlock = function () { rm(LOCK); };
+    try { fs.writeFileSync(LOCK, String(Date.now())); } catch (e) {}
+    var job = (k === 'script' ? ytdlpVersion() : Promise.resolve('')).then(function (current) {
+      return get('https://github.com/yt-dlp/yt-dlp/releases/latest').then(function (r) {
+        var latest = decodeURIComponent(r.url.replace(/[?#].*$/, '').replace(/\/+$/, '').split('/').pop() || '');
+        if (current && latest && latest === current) return { updated: false, version: current };
+        log('yt-dlp : mise à jour ' + (current || '(fichier unique)') + ' → ' + (latest || 'dernière version') + '…');
+        return installYtdlp().then(function (v) { return { updated: true, version: v || latest }; });
+      });
+    });
+    job.then(unlock, unlock);
+    return job;
   }
 
   // ==================== outils Intel → arm64 (Apple Silicon) ====================
@@ -192,7 +231,7 @@
       .then(done, done);
   }
 
-  window.MoriToolsMac = { run: run, kind: kind };
+  window.MoriToolsMac = { run: run, kind: kind, updateYtdlp: updateYtdlp, ownsYtdlp: ownsYtdlp };
   var me = document.currentScript || {};
   if (!(me.dataset && me.dataset.manual)) setTimeout(run, 12000);
 })();

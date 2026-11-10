@@ -2911,26 +2911,94 @@ function bundledDenoArgs() {
   }
 }
 
-/** Métadonnées d'un lien (titre, durée, résolutions disponibles), sans rien télécharger */
-export async function fetchOnlineMediaInfo(ytdlp, url) {
-  const res = await runProcess(ytdlp, ['-J', '--no-playlist', '--no-warnings', '--encoding', 'utf-8', ...bundledDenoArgs(), '--', url]);
+// ---------- Extraction en ligne : une seule par vidéo, gardée en mémoire ----------
+// Chaque appel à yt-dlp relit la page de la vidéo (2 à 4 s). Les formats (« Analyser ») et les flux d'aperçu (▶)
+// sortent maintenant de la même extraction, gardée 20 min : ouvrir l'aperçu puis choisir le format, revenir sur une
+// vidéo déjà vue ou la survoler avant de cliquer ne relance rien. Les adresses de flux de YouTube restent valables
+// plusieurs heures.
+const ONLINE_CACHE_MS = 20 * 60 * 1000;
+// H.264 d'abord : le navigateur intégré de Premiere ne lit pas toujours l'AV1 ou le VP9
+const PREVIEW_FORMAT = 'bv*[height<=360][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=360][ext=mp4]+ba[ext=m4a]/bv*[height<=360]+ba/b[height<=480]/b/b*';
+const onlineCache = new Map();
+let prefetchRunning = 0;
+
+async function extractOnlineMedia(ytdlp, url) {
+  const base = ['-J', '--no-playlist', '--no-warnings', '--encoding', 'utf-8', ...bundledDenoArgs()];
+  let res = await runProcess(ytdlp, [...base, '-f', PREVIEW_FORMAT, '--', url]);
+  // aucun format d'aperçu sur ce site : les métadonnées restent lisibles sans sélection de format
+  if (res.code !== 0 && /Requested format is not available/i.test(res.stderr)) res = await runProcess(ytdlp, [...base, '--', url]);
   if (res.code !== 0) {
     const last = res.stderr.trim().split(/\r?\n/).pop() || '';
     throw new Error(last.replace(/^ERROR:\s*/, '') || 'lien illisible');
   }
   const data = JSON.parse(res.stdout);
-  const heights = Array.from(new Set((data.formats || []).filter(f => f.vcodec && f.vcodec !== 'none' && f.height).map(f => f.height))).sort((a, b) => b - a);
+  const heights = Array.from(
+    new Set((data.formats || []).filter((f) => f.vcodec && f.vcodec !== 'none' && f.height).map((f) => f.height))
+  ).sort((a, b) => b - a);
+  const isUrl = (u) => typeof u === 'string' && /^https?:/.test(u);
+  const picked = Array.isArray(data.requested_formats) ? data.requested_formats.filter((f) => f && isUrl(f.url)) : [];
+  let streams = null;
+  if (picked.length > 0) {
+    const video = picked.find((f) => f.vcodec && f.vcodec !== 'none') || picked[0];
+    const audio = picked.find((f) => f !== video);
+    streams = { video: video.url, audio: audio ? audio.url : undefined };
+  } else if (isUrl(data.url)) streams = { video: data.url };
   return {
-    url: data.webpage_url || url,
-    title: data.title || url,
-    uploader: data.uploader || data.channel || '',
-    durationSec: data.duration || 0,
-    thumbnail: data.thumbnail || '',
-    heights
+    info: {
+      url: data.webpage_url || url,
+      title: data.title || url,
+      uploader: data.uploader || data.channel || '',
+      durationSec: data.duration || 0,
+      thumbnail: data.thumbnail || '',
+      heights,
+    },
+    streams,
   };
 }
+
+function fetchOnlineMedia(ytdlp, url) {
+  const hit = onlineCache.get(url);
+  if (hit && Date.now() - hit.at < ONLINE_CACHE_MS) return hit.promise;
+  const promise = extractOnlineMedia(ytdlp, url);
+  onlineCache.set(url, { at: Date.now(), promise });
+  // un échec n'est pas gardé (vidéo momentanément refusée, réseau coupé…)
+  promise.catch(() => onlineCache.get(url)?.promise === promise && onlineCache.delete(url));
+  if (onlineCache.size > 200) {
+    const now = Date.now();
+    onlineCache.forEach((v, k) => now - v.at >= ONLINE_CACHE_MS && onlineCache.delete(k));
+  }
+  return promise;
+}
+
+/** Extraction lancée d'avance (résultat survolé) : au clic, formats et aperçu sont déjà là. Deux à la fois au plus. */
+export function prefetchOnlineMedia(ytdlp, url) {
+  const hit = onlineCache.get(url);
+  if ((hit && Date.now() - hit.at < ONLINE_CACHE_MS) || prefetchRunning >= 2) return;
+  prefetchRunning++;
+  const done = () => { prefetchRunning--; };
+  fetchOnlineMedia(ytdlp, url).then(done, done);
+}
+
+/** Métadonnées d'un lien (titre, durée, résolutions disponibles), sans rien télécharger */
+export async function fetchOnlineMediaInfo(ytdlp, url) {
+  return (await fetchOnlineMedia(ytdlp, url)).info;
+}
+
 /** Recherche YouTube (yt-dlp « ytsearchN: »), sans télécharger : titres, chaînes, durées, miniatures */
-export async function searchYoutube(ytdlp, query, count) {
+// Recherches déjà faites (10 min) : revenir sur les mêmes mots réaffiche la liste sans attendre
+const SEARCH_CACHE_MS = 10 * 60 * 1000;
+const searchCache = new Map();
+export function searchYoutube(ytdlp, query, count) {
+  const key = `${Math.round(count) || 10}:${query.trim().toLowerCase()}`;
+  const hit = searchCache.get(key);
+  if (hit && Date.now() - hit.at < SEARCH_CACHE_MS) return hit.promise;
+  const promise = searchYoutubeNow(ytdlp, query, count);
+  searchCache.set(key, { at: Date.now(), promise });
+  promise.catch(() => searchCache.get(key)?.promise === promise && searchCache.delete(key));
+  if (searchCache.size > 50) searchCache.delete(searchCache.keys().next().value);
+  return promise;
+}
+async function searchYoutubeNow(ytdlp, query, count) {
   const n = Math.max(1, Math.min(50, Math.round(count) || 10));
   const res = await runProcess(ytdlp, ['-J', '--flat-playlist', '--no-warnings', '--encoding', 'utf-8', ...bundledDenoArgs(), '--', `ytsearch${n}:${query}`]);
   if (res.code !== 0) {
@@ -2955,16 +3023,37 @@ export async function searchYoutube(ytdlp, query, count) {
  * adresse web (erreur 153). YouTube sépare presque toujours image et son : deux adresses, parfois une seule.
  */
 export async function fetchPreviewStreams(ytdlp, url) {
-  const res = await runProcess(ytdlp, ['-g', '--no-playlist', '--no-warnings', ...bundledDenoArgs(), '-f', 'bv*[height<=360][ext=mp4]+ba[ext=m4a]/bv*[height<=360]+ba/b[height<=480]/b', '--', url]);
-  const lines = res.stdout.split(/\r?\n/).map(l => l.trim()).filter(l => /^https?:/.test(l));
-  if (res.code !== 0 || lines.length === 0) {
-    const last = res.stderr.trim().split(/\r?\n/).pop() || '';
-    throw new Error(last.replace(/^ERROR:\s*/, '') || 'aperçu indisponible');
+  const media = await fetchOnlineMedia(ytdlp, url);
+  if (!media.streams) throw new Error('aperçu indisponible');
+  return media.streams;
+}
+
+/** Version de yt-dlp (« 2026.10.26 »), vide si illisible */
+export async function readYtdlpVersion(ytdlp) {
+  try {
+    const res = await runProcess(ytdlp, ['--version']);
+    return res.code === 0 ? res.stdout.trim().split(/\r?\n/)[0] || '' : '';
+  } catch {
+    return '';
   }
-  return {
-    video: lines[0],
-    audio: lines[1]
-  };
+}
+
+/**
+ * Met yt-dlp à jour (YouTube casse régulièrement les anciennes versions) et résout un message à afficher.
+ * Mac, copie de Mori (version dossier) : nouvelle archive téléchargée et vérifiée par vendor/mori-tools-mac.js.
+ * Ailleurs : mise à jour intégrée de yt-dlp (« -U »), qui dit elle-même quand elle ne s'applique pas (Homebrew, winget…).
+ */
+export async function updateYtdlp(ytdlp) {
+  const mac = (window).MoriToolsMac;
+  if (!isWindowsPlatform() && mac && typeof mac.updateYtdlp === 'function' && mac.ownsYtdlp(ytdlp)) {
+    const r = await mac.updateYtdlp();
+    return r.updated ? `yt-dlp mis à jour : ${r.version}` : `yt-dlp est déjà à jour (${r.version})`;
+  }
+  const res = await runProcess(ytdlp, ['-U']);
+  const lines = (res.stdout + '\n' + res.stderr).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const last = (lines.pop() || '').replace(/^ERROR:\s*/, '');
+  if (res.code !== 0) throw new Error(last || 'mise à jour impossible');
+  return /up to date/i.test(last) ? 'yt-dlp est déjà à jour' : /Updated yt-dlp to/i.test(last) ? 'yt-dlp mis à jour' : last || 'yt-dlp est à jour';
 }
 
 /**
@@ -3650,6 +3739,8 @@ export function buildYtdlpArgs(url, format, maxHeight, outputDir, ffmpegPath, wa
   const args = ['--no-playlist', '--no-warnings', '--quiet', '--progress', '--newline', '--windows-filenames', '--encoding', 'utf-8', '-P', outputDir, '-o', `%(title).120B [%(id)s]${sectionLabel}.%(ext)s`, '--print', 'after_move:MORI_FILE:%(filepath)s', ...bundledDenoArgs()];
   if (ffmpegPath) args.push('--ffmpeg-location', pathMod.dirname(ffmpegPath));
   // seulement le passage choisi, coupé à l'image près (réencodé autour des points de coupe)
+  // vidéos livrées en fragments (DASH, HLS) : 4 à la fois au lieu d'un seul
+  if (!section) args.push('-N', '4');
   if (section) args.push('--download-sections', `*${section.start.toFixed(3)}-${section.end.toFixed(3)}`, '--force-keyframes-at-cuts');
   if (format === 'video') {
     const h = maxHeight > 0 ? `[height<=${maxHeight}]` : '';
@@ -3675,6 +3766,8 @@ export function runYtdlp(ytdlp, args, onProgress) {
   let stderrTail = '';
   let step = 1;
   let lastRatio = 0;
+  let sentAt = 0;
+  let sentStep = 0;
   const handleLine = line => {
     if (line.startsWith('MORI_FILE:')) {
       finalPath = line.slice('MORI_FILE:'.length).trim();
@@ -3685,7 +3778,14 @@ export function runYtdlp(ytdlp, args, onProgress) {
       const ratio = parseFloat(m[1]) / 100;
       if (ratio < lastRatio - 0.5) step++; // nouveau flux (l'audio après la vidéo)
       lastRatio = ratio;
-      onProgress(ratio, step);
+      // au plus 5 mises à jour par seconde : avec plusieurs téléchargements de front, chaque ligne de yt-dlp
+      // redessinait toute la liste
+      const now = Date.now();
+      if (step !== sentStep || ratio >= 1 || now - sentAt >= 200) {
+        sentAt = now;
+        sentStep = step;
+        onProgress(ratio, step);
+      }
     }
   };
   // la progression peut sortir sur stdout ou stderr selon le mode silencieux : on lit les deux
@@ -4943,6 +5043,9 @@ export const VideoTranscoder = () => {
 
 // ==================== components/WebDownloader.tsx ====================
 
+// Téléchargements menés de front : au-delà, YouTube ralentit ou refuse (HTTP 429) et le débit se partage
+const MAX_PARALLEL_DOWNLOADS = 3;
+let downloadSeq = 0;
 const WEB_SETTINGS_KEYS = {
   format: 'cutflow.webFormat',
   maxHeight: 'cutflow.webMaxHeight',
@@ -4986,8 +5089,10 @@ export const WebDownloader = () => {
     setTrimStart('');
     setTrimEnd('');
   }, [info?.url]);
-  const busyRef = useRef(false);
-  const runningRef = useRef(null);
+  // téléchargements en cours : de quoi annuler chacun, ceux déjà lancés, et leur nombre
+  const cancelsRef = useRef(new Map());
+  const startedRef = useRef(new Set());
+  const activeCountRef = useRef(0);
   const settingsRef = useRef({
     autoImport
   });
@@ -5063,7 +5168,7 @@ export const WebDownloader = () => {
     } : undefined;
     const title = section ? `${info.title} [${formatClock(section.start)} → ${formatClock(section.end)}]` : info.title;
     setJobs(prev => [...prev, {
-      id: `dl-${Date.now()}`,
+      id: `dl-${Date.now()}-${++downloadSeq}`,
       url: info.url,
       title,
       format,
@@ -5081,6 +5186,47 @@ export const WebDownloader = () => {
     setSelectedResult(null);
     setInfo(null);
   };
+  /** Résultat de recherche téléchargé tout de suite, avec le format et la qualité réglés (sans passer par l'analyse) */
+  const quickDownload = (r) => {
+    setJobs((prev) => [
+      ...prev,
+      { id: `dl-${Date.now()}-${++downloadSeq}`, url: r.url, title: r.title, format, maxHeight, wav: currentWav, status: 'queued', progress: 0 },
+    ]);
+  };
+  const isQueued = (link) => jobs.some((j) => j.url === link && ACTIVE_DOWNLOAD_STATUSES.includes(j.status));
+  // résultat survolé un instant : son extraction part d'avance, l'aperçu et les formats s'ouvrent alors sans attendre
+  const hoverTimerRef = useRef(null);
+  const hoverResult = r => {
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = r && ytdlp && !r.live ? setTimeout(() => prefetchOnlineMedia(ytdlp, r.url), 350) : null;
+  };
+
+  // yt-dlp : version affichée et mise à jour depuis le panneau
+  const [ytVersion, setYtVersion] = useState('');
+  const [ytUpdate, setYtUpdate] = useState({ busy: false, message: '' });
+  useEffect(() => {
+    let alive = true;
+    if (ytdlp) readYtdlpVersion(ytdlp).then((v) => alive && setYtVersion(v));
+    return () => {
+      alive = false;
+    };
+  }, [ytdlp]);
+  const handleUpdateYtdlp = async () => {
+    if (!ytdlp || ytUpdate.busy) return;
+    if (jobs.some((j) => ACTIVE_DOWNLOAD_STATUSES.includes(j.status))) {
+      setYtUpdate({ busy: false, message: 'Attendez la fin des téléchargements en cours.', isError: true });
+      return;
+    }
+    setYtUpdate({ busy: true, message: 'Mise à jour de yt-dlp…' });
+    try {
+      const message = await updateYtdlp(ytdlp);
+      setYtVersion(await readYtdlpVersion(ytdlp));
+      setYtUpdate({ busy: false, message });
+    } catch (err) {
+      setYtUpdate({ busy: false, message: `Mise à jour impossible : ${err?.message || err}`, isError: true });
+    }
+  };
+
   const processJob = async job => {
     if (!ytdlp) return;
     let output = '';
@@ -5101,10 +5247,7 @@ export const WebDownloader = () => {
           progress: ratio,
           message: (job.format === 'video' && step > 1 && !job.section ? 'Téléchargement de l’audio…' : what) + retryNote
         }));
-        runningRef.current = {
-          id: job.id,
-          cancel: run.cancel
-        };
+        cancelsRef.current.set(job.id, run.cancel);
         try {
           output = await run.promise;
           break;
@@ -5113,7 +5256,7 @@ export const WebDownloader = () => {
           await new Promise(r => setTimeout(r, 1500 * attempt));
         }
       }
-      runningRef.current = null;
+      cancelsRef.current.delete(job.id);
 
       // Vidéo hors H.264/HEVC (VP9/AV1 en 4K) ou à cadence variable : réencodage pour Premiere
       if (job.format === 'video' && ffmpegTools) {
@@ -5129,17 +5272,14 @@ export const WebDownloader = () => {
           const conv = runFfmpegConversion(ffmpegTools, buildFfmpegArgs(output, converted, plan, probe), probe.durationSec, ratio => updateJob(job.id, {
             progress: ratio
           }));
-          runningRef.current = {
-            id: job.id,
-            cancel: conv.cancel
-          };
+          cancelsRef.current.set(job.id, conv.cancel);
           try {
             await conv.promise;
           } catch (err) {
             deleteFileQuietly(converted);
             throw err;
           }
-          runningRef.current = null;
+          cancelsRef.current.delete(job.id);
           deleteFileQuietly(output);
           output = converted;
         }
@@ -5166,7 +5306,7 @@ export const WebDownloader = () => {
         });
       }
     } catch (err) {
-      runningRef.current = null;
+      cancelsRef.current.delete(job.id);
       const canceled = err?.message === 'annulé';
       updateJob(job.id, {
         status: canceled ? 'canceled' : 'error',
@@ -5175,19 +5315,26 @@ export const WebDownloader = () => {
     }
   };
 
-  // File d'attente : un téléchargement à la fois, en arrière-plan
+  // File d'attente : jusqu'à MAX_PARALLEL_DOWNLOADS téléchargements de front, en arrière-plan. Les imports dans
+  // Premiere restent un par un (file ExtendScript).
   useEffect(() => {
-    if (busyRef.current || !ytdlp) return;
-    const next = jobs.find(j => j.status === 'queued');
-    if (!next) return;
-    busyRef.current = true;
-    processJob(next).finally(() => {
-      busyRef.current = false;
-      setJobs(prev => [...prev]);
-    });
+    if (!ytdlp) return;
+    for (const next of jobs) {
+      if (activeCountRef.current >= MAX_PARALLEL_DOWNLOADS) break;
+      if (next.status !== 'queued' || startedRef.current.has(next.id)) continue;
+      startedRef.current.add(next.id);
+      activeCountRef.current++;
+      processJob(next).finally(() => {
+        activeCountRef.current--;
+        cancelsRef.current.delete(next.id);
+        setJobs((prev) => [...prev]);
+      });
+    }
   }, [jobs, ytdlp]);
   const cancelJob = job => {
-    if (runningRef.current?.id === job.id) runningRef.current.cancel();else if (job.status === 'queued') updateJob(job.id, {
+    const cancel = cancelsRef.current.get(job.id);
+    if (cancel) cancel();
+    else if (job.status === 'queued') updateJob(job.id, {
       status: 'canceled',
       message: 'Retiré de la file'
     });
@@ -5486,6 +5633,8 @@ export const WebDownloader = () => {
               className: open ? 'bg-white/[0.04]' : '',
               children: [/*#__PURE__*/_jsxs("button", {
                 onClick: () => pickResult(r),
+                onMouseEnter: () => hoverResult(r),
+                onMouseLeave: () => hoverResult(null),
                 className: "w-full flex gap-2.5 p-2 text-left hover:bg-white/[0.03] transition cursor-pointer",
                 title: r.live ? 'Direct : ne peut pas être téléchargé' : 'Choisir le format et télécharger',
                 children: [/*#__PURE__*/_jsxs("div", {
@@ -5522,6 +5671,19 @@ export const WebDownloader = () => {
                     className: "text-[10px] text-zinc-400 mt-0.5 truncate",
                     children: [r.channel, r.views ? ` · ${formatViews(r.views)}` : '']
                   })]
+                }), !r.live && /*#__PURE__*/_jsx("span", {
+                  role: "button",
+                  onClick: e => {
+                    e.stopPropagation();
+                    if (!isQueued(r.url)) quickDownload(r);
+                  },
+                  title: isQueued(r.url) ? 'Déjà dans les téléchargements' : `Télécharger tout de suite (${format === 'video' ? `MP4${maxHeight ? ` ${maxHeight}p` : ''}` : 'WAV'})`,
+                  className: `p-1 rounded transition flex-shrink-0 ${isQueued(r.url) ? 'text-emerald-300' : 'text-zinc-500 hover:text-zinc-200'}`,
+                  children: isQueued(r.url) ? /*#__PURE__*/_jsx(CheckCircle2, {
+                    className: "w-4 h-4"
+                  }) : /*#__PURE__*/_jsx(Download, {
+                    className: "w-4 h-4"
+                  })
                 })]
               }), previewUrl === r.url && ytdlp && !(trimOn && selectedResult === r.id) && /*#__PURE__*/_jsx("div", {
                 className: "px-2 pb-2",
@@ -5577,6 +5739,19 @@ export const WebDownloader = () => {
             className: "underline hover:text-zinc-300 cursor-pointer",
             children: "Changer"
           })]
+        })]
+      }), ready && /*#__PURE__*/_jsxs("div", {
+        className: "flex items-center justify-between gap-2 text-[10px] text-zinc-500",
+        children: [/*#__PURE__*/_jsx("span", {
+          className: `truncate ${ytUpdate.isError ? 'text-red-300' : ''}`,
+          title: "Moteur de t\xE9l\xE9chargement",
+          children: ytUpdate.message || `yt-dlp ${ytVersion || '…'}`
+        }), /*#__PURE__*/_jsx("button", {
+          onClick: handleUpdateYtdlp,
+          disabled: ytUpdate.busy,
+          className: "underline hover:text-zinc-300 cursor-pointer flex-shrink-0",
+          title: "YouTube change souvent : \xE0 faire si une recherche ou un t\xE9l\xE9chargement \xE9choue",
+          children: ytUpdate.busy ? 'Mise à jour…' : 'Mettre à jour yt-dlp'
         })]
       }), /*#__PURE__*/_jsx("p", {
         className: "text-[10px] text-zinc-500",

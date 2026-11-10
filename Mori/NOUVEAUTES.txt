@@ -1,5 +1,9 @@
 2.12.10
 - Web (Mac) : recherche, aperçu et téléchargement bien plus rapides (yt-dlp démarrait en ~10 s à chaque action, maintenant ~0,3 s). Le panneau remplace lui-même l'ancien yt-dlp au démarrage (une fois, en arrière-plan).
+- Web : jusqu'à 3 téléchargements en même temps (un seul avant), chacun annulable.
+- Web : bouton ⬇ sur chaque résultat de recherche pour télécharger tout de suite avec le format et la qualité réglés, sans passer par l'analyse.
+- Web : l'aperçu et le choix du format d'une même vidéo ne demandent plus qu'une seule lecture de la page (deux avant) ; une vidéo ou une recherche déjà vue se rouvre aussitôt, et survoler un résultat le prépare d'avance.
+- Web : version de yt-dlp affichée, avec un bouton « Mettre à jour yt-dlp » (à utiliser quand YouTube refuse une recherche ou un téléchargement).
 - Web (Mac) : ✂ Trim fonctionne (FFmpeg refusait la connexion sécurisée à YouTube).
 - Mac : FFmpeg et Deno installés en version Intel par un ancien installeur sont remplacés par la version Apple Silicon, par l'installeur ou par le panneau au démarrage.
 - Audio, Vidéo, Chutier : le mode automatique (éteint par défaut) est retrouvé dans l'état où vous l'avez laissé à la fermeture.
