@@ -1,3 +1,8 @@
+2.12.11
+- Panneau qui « ne faisait plus rien » jusqu'au redémarrage de Premiere (chutiers, import, marqueurs, téléchargements) : quand Premiere ne renvoyait pas la réponse à une commande, toutes les suivantes restaient en attente. Le panneau vérifie maintenant que Premiere est de nouveau libre et reprend tout seul.
+- Web : l'import dans Premiere n'occupe plus une place de téléchargement ; une connexion figée est abandonnée et réessayée.
+- Si Premiere ne répond réellement plus, le message le dit clairement, et le rapport de diagnostic garde la trace des commandes lentes ou sans réponse.
+
 2.12.10
 - Web (Mac) : recherche, aperçu et téléchargement bien plus rapides (yt-dlp démarrait en ~10 s à chaque action, maintenant ~0,3 s). Le panneau remplace lui-même l'ancien yt-dlp au démarrage (une fois, en arrière-plan).
 - Web : jusqu'à 3 téléchargements en même temps (un seul avant), chacun annulable.

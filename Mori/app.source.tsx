@@ -789,9 +789,17 @@ function wrapExtendScript(script: string): string {
 // Les appels ExtendScript sont exécutés un par un : avec plusieurs scans auto en parallèle,
 // le délai d'attente ne doit courir qu'une fois le script réellement envoyé à Premiere.
 // Premiere n'exécute lui aussi qu'un script à la fois (tous panneaux confondus) : après un délai dépassé, le script
-// suivant n'est envoyé qu'à la vraie réponse de Premiere, sinon il attendrait derrière le précédent et dépasserait
-// son délai à son tour (timeouts en cascade). Garde-fou : au plus EXTENDSCRIPT_STUCK_MS de plus si rien ne revient.
+// suivant n'est envoyé qu'une fois Premiere libre, sinon il attendrait derrière le précédent et dépasserait
+// son délai à son tour (timeouts en cascade).
+//
+// « Premiere libre » ne peut pas se déduire de la seule réponse au script : il arrive qu'elle ne revienne jamais
+// (réponse perdue par CEP), et toute la file restait alors bloquée — plus aucune fonction du panneau ne marchait
+// jusqu'au redémarrage de Premiere. Un script resté sans réponse est donc suivi d'un « ping » : Premiere traitant
+// les scripts dans l'ordre, la réponse au ping prouve qu'il a fini le précédent, et la file repart aussitôt.
+// Garde-fou : au plus EXTENDSCRIPT_STUCK_MS après le délai si ni l'un ni l'autre ne revient.
 const EXTENDSCRIPT_STUCK_MS = 120000;
+// script toujours en cours après ce temps : un ping part derrière lui (un seul par script)
+const EXTENDSCRIPT_PROBE_MS = 15000;
 let extendScriptQueue: Promise<unknown> = Promise.resolve();
 // scripts dont le délai est dépassé et auxquels Premiere n'a pas encore répondu : tant qu'il y en a, les lectures
 // de fond (scans automatiques, nom du projet, marqueurs de la timeline) n'ajoutent rien à la file
@@ -800,19 +808,53 @@ let extendScriptStalled = 0;
 export function premiereStalled(): boolean {
   return extendScriptStalled > 0;
 }
+// scripts de suite restés sans aucune réponse (ni la leur, ni celle du ping) : Premiere ne répond plus du tout
+let extendScriptSilent = 0;
+/** Premiere ne répond plus à aucun script depuis plusieurs essais : seul son redémarrage le rétablit */
+export function premiereScriptsDown(): boolean {
+  return extendScriptSilent >= 2;
+}
+
+/** Journal des scripts lents ou sans réponse (repris par le rapport de diagnostic) : Mori-scripts.log */
+function logScript(text: string) {
+  try {
+    const node = (window as any).cep_node;
+    if (!node || typeof node.require !== 'function') return;
+    const fs = node.require('fs'), pathMod = node.require('path'), os = node.require('os');
+    const dir = node.process.platform === 'darwin' ? pathMod.join(os.homedir(), 'Library', 'Logs') : os.tmpdir();
+    const file = pathMod.join(dir, 'Mori-scripts.log');
+    try {
+      if (fs.statSync(file).size > 200000) fs.writeFileSync(file, String(fs.readFileSync(file, 'utf8')).slice(-60000));
+    } catch {}
+    fs.appendFile(file, `${new Date().toISOString()}  ${text}\n`, () => {});
+  } catch {}
+}
+/** Début lisible d'un script, pour le journal */
+function scriptLabel(script: string): string {
+  return script.replace(/\s+/g, ' ').trim().slice(0, 90);
+}
+
 export function evalExtendScript<T = any>(script: string, timeoutMs = 6000): Promise<T> {
   const job = extendScriptQueue.then(() => evalExtendScriptNow<T>(script, timeoutMs));
   extendScriptQueue = job.then(j => j.settled, () => {});
   return job.then(j => j.result);
 }
 
-/** result : réponse ou erreur de délai ; settled : Premiere a réellement fini (ou ne répondra plus) */
+/** result : réponse ou erreur de délai ; settled : Premiere est libre pour le script suivant (ou ne répondra plus) */
 function evalExtendScriptNow<T = any>(script: string, timeoutMs: number): { result: Promise<T>; settled: Promise<void> } {
+  const label = scriptLabel(script);
   script = wrapExtendScript(script);
   let settleNow: () => void = () => {};
   const settled = new Promise<void>(r => { settleNow = r; });
   let stalled = false;
+  let isSettled = false;
+  let probeTimer: any = null;
+  let stuckTimer: any = null;
   const settle = () => {
+    if (isSettled) return;
+    isSettled = true;
+    if (probeTimer) clearTimeout(probeTimer);
+    if (stuckTimer) clearTimeout(stuckTimer);
     if (stalled) {
       stalled = false;
       extendScriptStalled--;
@@ -827,25 +869,58 @@ function evalExtendScriptNow<T = any>(script: string, timeoutMs: number): { resu
     }
     const startedAt = Date.now();
     let resolved = false;
-    let stuckTimer: any = null;
+    let answered = false;
+    let probed = false;
+    // ping envoyé derrière le script : sa réponse prouve que Premiere a fini le script, même si la réponse du
+    // script ne revient pas (ou qu'il tourne encore dans une fenêtre de Premiere qui laisse passer les suivants)
+    const probe = () => {
+      if (probed || answered || isSettled) return;
+      probed = true;
+      try {
+        cs.evalScript('"MORI_PING"', () => {
+          if (answered || isSettled) return;
+          // la réponse du script, si elle existe, précède celle du ping : on lui laisse un instant
+          setTimeout(() => {
+            if (answered || isSettled) return;
+            extendScriptSilent = 0;
+            logScript(`sans réponse après ${Date.now() - startedAt} ms, Premiere répond au ping : file relancée — ${label}`);
+            settle();
+          }, 1500);
+        });
+      } catch {}
+    };
+    probeTimer = setTimeout(probe, Math.min(EXTENDSCRIPT_PROBE_MS, timeoutMs));
     const timeout = setTimeout(() => {
       if (resolved) return;
       resolved = true;
-      stalled = true;
-      extendScriptStalled++;
-      stuckTimer = setTimeout(settle, EXTENDSCRIPT_STUCK_MS);
+      if (!isSettled) {
+        stalled = true;
+        extendScriptStalled++;
+        stuckTimer = setTimeout(() => {
+          if (isSettled) return;
+          extendScriptSilent++;
+          logScript(`aucune réponse ${EXTENDSCRIPT_STUCK_MS / 1000} s après le délai, ni au ping (${extendScriptSilent} de suite) — ${label}`);
+          settle();
+        }, EXTENDSCRIPT_STUCK_MS);
+        probe();
+      }
+      logScript(`délai de ${Math.round(timeoutMs / 1000)} s dépassé — ${label}`);
       resolve({
         success: false,
-        error: `Premiere Pro n'a pas répondu en ${Math.round(timeoutMs / 1000)} s (occupé : import, rendu, fenêtre ouverte ou projet très lourd). Réessayez dans un instant. (Timeout ExtendScript)`
+        error: premiereScriptsDown()
+          ? 'Premiere Pro ne répond plus aux commandes de Mori. Enregistrez votre projet puis redémarrez Premiere Pro. (Timeout ExtendScript)'
+          : `Premiere Pro n'a pas répondu en ${Math.round(timeoutMs / 1000)} s (occupé : import, rendu, fenêtre ouverte ou projet très lourd). Réessayez dans un instant. (Timeout ExtendScript)`
       });
     }, timeoutMs);
     try {
       cs.evalScript(script, (rawResult: string) => {
+        answered = true;
+        extendScriptSilent = 0;
         settle();
         if (resolved) {
           // réponse arrivée après le délai : la durée réelle aide à régler le délai de l'action
-          if (stuckTimer) clearTimeout(stuckTimer);
           console.warn(`[Mori] ExtendScript : réponse tardive après ${Date.now() - startedAt} ms (délai ${timeoutMs} ms)`);
+          logScript(`réponse tardive après ${Date.now() - startedAt} ms (délai ${Math.round(timeoutMs / 1000)} s) — ${label}`);
           return;
         }
         resolved = true;
@@ -868,6 +943,7 @@ function evalExtendScriptNow<T = any>(script: string, timeoutMs: number): { resu
         }
       });
     } catch (err: any) {
+      answered = true;
       settle();
       if (resolved) return;
       resolved = true;
@@ -4063,6 +4139,7 @@ export function buildYtdlpArgs(
   const sectionLabel = section ? ` ${clockForFilename(section.start)}-${clockForFilename(section.end)}` : '';
   const args = [
     '--no-playlist', '--no-warnings', '--quiet', '--progress', '--newline', '--windows-filenames', '--encoding', 'utf-8',
+    '--socket-timeout', '30',
     '-P', outputDir,
     '-o', `%(title).120B [%(id)s]${sectionLabel}.%(ext)s`,
     '--print', 'after_move:MORI_FILE:%(filepath)s',
@@ -5493,6 +5570,13 @@ export const WebDownloader: React.FC = () => {
   const canceledIdsRef = useRef(new Set<string>());
   const startedRef = useRef(new Set<string>());
   const activeCountRef = useRef(0);
+  // téléchargements qui occupent encore une des MAX_PARALLEL_DOWNLOADS places
+  const slotsRef = useRef(new Set<string>());
+  const releaseSlot = (id: string) => {
+    if (!slotsRef.current.delete(id)) return;
+    activeCountRef.current--;
+    setJobs((prev) => [...prev]); // relance la file
+  };
   const settingsRef = useRef({ autoImport });
   settingsRef.current = { autoImport };
 
@@ -5685,6 +5769,9 @@ export const WebDownloader: React.FC = () => {
       }
 
       stopIfCanceled();
+      // le fichier est là : la place est rendue avant l'import, pour que les suivants démarrent même si Premiere
+      // tarde à répondre
+      releaseSlot(job.id);
       if (settingsRef.current.autoImport && isRunningInPremiere()) {
         updateJob(job.id, { status: 'importing', message: 'Import dans Premiere…' });
         const res = await importIntoActiveBin(output);
@@ -5714,10 +5801,10 @@ export const WebDownloader: React.FC = () => {
       if (next.status !== 'queued' || startedRef.current.has(next.id)) continue;
       startedRef.current.add(next.id);
       activeCountRef.current++;
+      slotsRef.current.add(next.id);
       processJob(next).finally(() => {
-        activeCountRef.current--;
+        releaseSlot(next.id);
         cancelsRef.current.delete(next.id);
-        setJobs((prev) => [...prev]);
       });
     }
   }, [jobs, ytdlp]);
@@ -11804,7 +11891,7 @@ export default function App() {
 // ==================== components/AboutMori.tsx ====================
 
 /** Version affichée dans « À propos » : à garder alignée sur CSXS/manifest.xml */
-const APP_VERSION = '2.12.10';
+const APP_VERSION = '2.12.11';
 /** Version de Mori Checker (application autonome) : à garder alignée sur checker/package.json */
 const CHECKER_VERSION = '1.2.0';
 

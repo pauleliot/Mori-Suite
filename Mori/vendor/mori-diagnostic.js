@@ -207,10 +207,12 @@
         var logs = path.join(home, 'Library', 'Logs');
         tail(path.join(logs, 'Mori-raccourci.log'), 60);
         tail(path.join(logs, 'Mori-outils.log'), 30);
+        tail(path.join(logs, 'Mori-scripts.log'), 60);
         tail(path.join(logs, 'Mori-installation.log'), 80);
         tail(path.join(logs, 'Mori-installation.log.ui'), 30);
       }
       if (win) tail(path.join(os.tmpdir(), 'Mori-outils.log'), 30);
+      if (win) tail(path.join(os.tmpdir(), 'Mori-scripts.log'), 60);
       // journaux de CEP : celui de Premiere et ceux des fenêtres de Mori
       var cepDir = mac ? path.join(home, 'Library', 'Logs', 'CSXS') : os.tmpdir();
       attempt(function () {
