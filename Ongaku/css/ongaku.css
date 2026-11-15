@@ -194,6 +194,8 @@ select.sort { background: rgb(var(--zinc-950)); color: rgb(var(--zinc-200)); bor
 
 .list { flex: 1; min-height: 0; overflow-y: auto; margin: 8px -4px 0; padding: 0 4px; }
 .row { display: grid; grid-template-columns: 40px minmax(90px, 150px) 1fr auto; align-items: center; gap: 12px; padding: 8px 8px; border-radius: 8px; cursor: pointer; transition: background .12s; }
+/* chaque ligne est isolée : en redessiner une ne recalcule pas la mise en page des autres */
+.row { contain: layout style; }
 .row:hover { background: rgb(255 255 255 / .04); }
 .row.current { background: rgb(var(--accent-300) / .08); box-shadow: inset 2px 0 0 rgb(var(--cream-300)); }
 .row .meta { min-width: 0; }

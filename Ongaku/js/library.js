@@ -128,6 +128,9 @@
 
   function removeFile(p) { try { fs.unlinkSync(p); } catch (e) {} }
   function fileSize(p) { try { return fs.statSync(p).size; } catch (e) { return -1; } }
+  /** Taille et date d'un fichier, comme le scan (clé du cache) ; null s'il n'existe pas */
+  function statFile(p) { try { var st = fs.statSync(p); return { size: st.size, mtime: st.mtimeMs }; } catch (e) { return null; } }
+  function isAudioPath(p) { return !!AUDIO_EXT[extname(String(p))]; }
   function copyFileSync(src, dst) { ensureDir(pathMod.dirname(dst)); fs.copyFileSync(src, dst); return dst; }
 
   /**
@@ -292,7 +295,7 @@
   }
   function unpackPeaks(v) {
     if (typeof v !== 'string') return v;
-    var s = atob(v.replace(/^b64:/, '')), out = new Array(s.length);
+    var s = atob(v.replace(/^b64:/, '')), out = new Uint8Array(s.length);
     for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
     return out;
   }
@@ -300,7 +303,7 @@
   var dirty = false;
   function cachePut(file, data) {
     var c = cacheGet(file) || { size: file.size, mtime: file.mtime };
-    for (var k in data) if (data.hasOwnProperty(k)) c[k] = k === 'peaks' && Array.isArray(data[k]) ? packPeaks(data[k]) : data[k];
+    for (var k in data) if (data.hasOwnProperty(k)) c[k] = k === 'peaks' && data[k] && typeof data[k] !== 'string' ? packPeaks(data[k]) : data[k];
     cache[file.path] = c;
     scheduleSave();
     return c;
@@ -314,7 +317,7 @@
     saveTimer = setTimeout(function () {
       dirty = false;
       fs.writeFile(cacheFile, JSON.stringify(cache), function () {});
-    }, 5000);
+    }, 15000);
   }
 
   /** Écriture immédiate (fermeture / masquage du panneau) */
@@ -342,6 +345,8 @@
     dirname: dirname,
     listDirs: listDirs,
     fileSize: fileSize,
+    statFile: statFile,
+    isAudioPath: isAudioPath,
     removeFile: removeFile,
     copyFileSync: copyFileSync,
     audioInfo: audioInfo,

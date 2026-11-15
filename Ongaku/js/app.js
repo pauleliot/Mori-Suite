@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.9.0'; // à garder identique à CSXS/manifest.xml
+  var APP_VERSION = '1.9.1'; // à garder identique à CSXS/manifest.xml
   var Lib = window.OngakuLib, An = window.OngakuAnalysis, Fx = window.OngakuEffects;
   var cs = new CSInterface();
   var inCEP = !!window.__adobe_cep__;
@@ -109,12 +109,14 @@
   }
   function css(name, a) { return 'rgba(' + getComputedStyle(document.documentElement).getPropertyValue('--' + name).trim().split(/\s+/).join(',') + ',' + (a == null ? 1 : a) + ')'; }
   var COLORS = {};
+  var waveCache = { key: null, peaks: null, base: null, played: null };
   function refreshColors() {
     COLORS = {
       wave: css('zinc-500'), waveDim: css('zinc-600', 0.6), played: css('cream-300'), accent: css('accent-300'),
       accentFill: css('accent-300', 0.13), beat: 'rgba(255,255,255,0.55)', down: css('accent-300', 0.8),
-      cream: css('cream-300'), ink: css('ink', 0.62), red: css('red-400')
+      cream: css('cream-300'), ink: css('ink', 0.62), inkSolid: css('ink'), red: css('red-400')
     };
+    waveCache.key = null;
   }
 
   // ==================== Toast ====================
@@ -220,15 +222,17 @@
   }
 
   var rafOn = false, lastFrame = 0;
-  function tick(now) {
-    if (closing) return;
-    if (!pb.playing) { rafOn = false; drawMain(); refreshTime(); drawCurrentMini(); return; }
-    if (!rafOn || !now || now - lastFrame > 33) {
-      lastFrame = now || 0;
-      drawMain(); refreshTime(); drawCurrentMini();
-    }
+  /** Lance la boucle d'affichage si elle ne tourne pas déjà (play() l'appelle à chaque déplacement) */
+  function tick() {
+    if (rafOn || closing) return;
     rafOn = true;
-    requestAnimationFrame(tick);
+    requestAnimationFrame(frame);
+  }
+  function frame(now) {
+    if (closing) { rafOn = false; return; }
+    if (!pb.playing) { rafOn = false; drawMain(); refreshTime(); drawCurrentMini(); return; }
+    if (now - lastFrame > 33) { lastFrame = now; drawMain(); refreshTime(); drawCurrentMini(); }
+    requestAnimationFrame(frame);
   }
 
   /**
@@ -256,10 +260,14 @@
   function stopPreview() { closePreview(); }
 
   // ==================== Bibliothèque ====================
+  var MAX_FILE = 1200 * 1024 * 1024; // au-delà, le décodage complet en mémoire figerait le panneau
   function getArrayBuffer(f) {
     if (f.synth) return Promise.resolve(Demo.wav(f).buffer);
+    if (f.size > MAX_FILE) return Promise.reject(new Error('fichier trop volumineux (' + Math.round(f.size / 1048576) + ' Mo)'));
     return Lib.readFileAsArrayBuffer(f.path);
   }
+  /** SFX : pas de BPM ni de beats, la forme d'onde suffit (analyse bien plus rapide) */
+  function peaksOnly(f) { return f.cat === 'sfx'; }
 
   function hydrate(f) {
     var g = Lib.guessFromName(f.name);
@@ -303,6 +311,7 @@
       }
       applyFilter();
       if (prefs.tab === 'music') renderMusic(); // compteurs Musique / SFX
+      tagIndex = 0;
       runTagQueue();
       if (!lists.some(function (l) { return l.length; })) toast('Aucun fichier audio trouvé dans les dossiers choisis.', 'err');
     });
@@ -332,10 +341,11 @@
   }
 
   // ---- file d'attente : tags ID3 ----
-  var tagRunning = 0;
+  var tagRunning = 0, tagIndex = 0;
   function runTagQueue() {
     while (tagRunning < 2 && !closing) {
-      var f = state.files.filter(function (x) { return !x.tagged && !x.synth; })[0];
+      var f = null;
+      while (tagIndex < state.files.length) { var x = state.files[tagIndex++]; if (!x.tagged && !x.synth) { f = x; break; } }
       if (!f) return;
       f.tagged = true;
       tagRunning++;
@@ -362,34 +372,55 @@
 
   // ---- file d'attente : analyse (onde + BPM), priorité aux lignes visibles ----
   var visible = new Set();
-  var anaRunning = false;
+  var anaRunning = 0, ANA_PARALLEL = 2, anaCursor = 0;
+  function todo(f) { return !f.analyzed && !f.failed && !f.analyzing && f !== state.current; }
   function nextToAnalyze() {
     var pick = null;
-    visible.forEach(function (f) { if (!pick && !f.analyzed && !f.failed && f !== state.current) pick = f; });
+    visible.forEach(function (f) { if (!pick && todo(f)) pick = f; });
     if (pick) return pick;
-    for (var i = 0; i < state.list.length; i++) {
-      var f = state.list[i];
-      if (!f.analyzed && !f.failed && f !== state.current) return f;
+    // le reste de la liste, en reprenant là où le dernier passage s'est arrêté
+    var n = state.list.length;
+    for (var k = 0; k < n; k++) {
+      var f = state.list[(anaCursor + k) % n];
+      if (todo(f)) { anaCursor = (anaCursor + k) % n; return f; }
     }
     return null;
   }
   function runAnalysisQueue() {
-    if (anaRunning || closing) return;
-    var f = nextToAnalyze();
-    if (!f) return;
-    anaRunning = true;
+    while (anaRunning < ANA_PARALLEL && !closing) {
+      var f = nextToAnalyze();
+      if (!f) break;
+      analyzeOne(f);
+    }
+    showAnalysisProgress();
+  }
+  function analyzeOne(f) {
+    anaRunning++;
     f.analyzing = true;
     updateRow(f);
-    getArrayBuffer(f).then(An.analyze).then(function (res) {
+    getArrayBuffer(f).then(function (ab) { return An.analyze(ab, peaksOnly(f)); }).then(function (res) {
       applyAnalysis(f, res);
     }).catch(function () {
       f.failed = true;
     }).then(function () {
       f.analyzing = false;
       updateRow(f);
-      anaRunning = false;
-      setTimeout(runAnalysisQueue, 40);
+      anaRunning--;
+      setTimeout(runAnalysisQueue, 10);
     });
+  }
+  /** « Analyse… 240 restants » à côté du compteur, tant que la bibliothèque affichée n'est pas prête */
+  var progressTimer = null;
+  function showAnalysisProgress() {
+    if (progressTimer) return;
+    progressTimer = setTimeout(function () {
+      progressTimer = null;
+      var el = $('#anaLeft');
+      if (!el) return;
+      var left = 0;
+      for (var i = 0; i < state.list.length; i++) if (!state.list[i].analyzed && !state.list[i].failed) left++;
+      el.textContent = left ? 'Analyse… ' + left + ' restant' + (left > 1 ? 's' : '') : '';
+    }, 400);
   }
   function applyAnalysis(f, res) {
     f.duration = res.duration; f.peaks = res.peaks; f.bpm = res.bpm; f.beats = res.beats;
@@ -423,7 +454,7 @@
     }).then(function (buf) {
       if (token !== state.loadToken) return;
       state.buffer = buf;
-      if (!f.analyzed) return An.analyzeBuffer(buf).then(function (res) { if (token === state.loadToken) applyAnalysis(f, res); });
+      if (!f.analyzed) return An.analyzeBuffer(buf, peaksOnly(f)).then(function (res) { applyAnalysis(f, res); });
     }).then(function () {
       if (token !== state.loadToken) return;
       renderPlayer();
@@ -510,6 +541,29 @@
     }
   }
 
+  /**
+   * Calques de la forme d'onde du lecteur (non lue / lue), dessinés une seule fois hors écran :
+   * pendant la lecture il ne reste que deux copies d'image par rafraîchissement.
+   */
+  function waveLayers(peaks, w, h, dpr) {
+    var key = w + 'x' + h + '|' + COLORS.wave + '|' + COLORS.played;
+    if (waveCache.key === key && waveCache.peaks === peaks) return waveCache;
+    var make = function (color) {
+      var c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      drawBars(c.getContext('2d'), peaks, w, h, dpr, 2, 1, 0, color, color, 1.5);
+      return c;
+    };
+    waveCache.key = key; waveCache.peaks = peaks;
+    waveCache.base = make(COLORS.wave); waveCache.played = make(COLORS.played);
+    return waveCache;
+  }
+  function blitWave(ctx, peaks, w, h, dpr, progress) {
+    var L = waveLayers(peaks, w, h, dpr), px = Math.max(0, Math.min(w, Math.round(progress * w)));
+    ctx.drawImage(L.base, 0, 0);
+    if (px > 0) ctx.drawImage(L.played, 0, 0, px, h, 0, 0, px, h);
+  }
+
   function drawMini(el, f) {
     var cv = el && el.querySelector('.mini canvas');
     if (!cv || !cv.clientWidth) return;
@@ -542,7 +596,7 @@
     if (state.pv) {
       var pv = state.pv, pdur = pv.buf.duration;
       X = function (t) { return (t / pdur) * w; };
-      drawBars(ctx, pv.peaks, w, h, dpr, 2, 1, pos / pdur, COLORS.wave, COLORS.played, 1.5);
+      blitWave(ctx, pv.peaks, w, h, dpr, pos / pdur);
       var cx = X(pv.cut);
       ctx.fillStyle = COLORS.accentFill; ctx.fillRect(cx, 0, w - cx, h);
       ctx.fillStyle = COLORS.accent; ctx.fillRect(cx - dpr / 2, 0, dpr * 1.5, h);
@@ -551,7 +605,7 @@
       ctx.beginPath();
       if (ctx.roundRect) ctx.roundRect(lx, 0, lw, 14 * dpr, [0, 0, 4 * dpr, 0]); else ctx.rect(lx, 0, lw, 14 * dpr);
       ctx.fill();
-      ctx.fillStyle = css('ink'); ctx.fillText(lab, lx + 5 * dpr, 10 * dpr);
+      ctx.fillStyle = COLORS.inkSolid; ctx.fillText(lab, lx + 5 * dpr, 10 * dpr);
       ctx.fillStyle = '#fff'; ctx.fillRect(Math.round(X(pos)), 0, dpr, h);
       if (hover.x >= 0) { ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.fillRect(Math.round(hover.x * dpr), 0, dpr, h); }
       return;
@@ -562,7 +616,7 @@
     X = function (t) { return (t / dur) * w; };
     var tab = prefs.tab;
 
-    drawBars(ctx, f.peaks, w, h, dpr, 2, 1, pos / dur, COLORS.wave, COLORS.played, 1.5);
+    blitWave(ctx, f.peaks, w, h, dpr, pos / dur);
 
     // grille de beats (onglet Beats uniquement)
     if (tab === 'beats' && f.beats) {
@@ -597,7 +651,7 @@
       ctx.beginPath();
       if (ctx.roundRect) ctx.roundRect(fx, 0, tw, fh, [0, 0, right ? 4 * dpr : 0, right ? 0 : 4 * dpr]); else ctx.rect(fx, 0, tw, fh);
       ctx.fill();
-      ctx.fillStyle = css('ink');
+      ctx.fillStyle = COLORS.inkSolid;
       ctx.fillText(label, fx + 5 * dpr, 10 * dpr);
     }
     if (state.inPt != null) flag(state.inPt, 'IN', true);
@@ -661,6 +715,7 @@
     refreshInOut();
     $('#btnPlace').onclick = function () { placeTrack(f); };
     bindDrag($('#dragCur'), function () { return dragPathFor(f); });
+    $('#dragCur').onmouseenter = buildExcerpt; // l'extrait In / Out se prépare au survol, juste avant le glisser
     refreshDragLabel();
     requestAnimationFrame(drawMain);
   }
@@ -753,7 +808,6 @@
   function afterIO() {
     refreshInOut(); refreshDragLabel(); drawMain(); drawCurrentMini();
     if (prefs.tab !== 'music') renderView();
-    scheduleExcerpt();
   }
   function markIn() {
     if (!state.buffer || state.pv) return;
@@ -894,7 +948,7 @@
       '<div class="toolbar">' +
       '<button class="chip ' + (prefs.filter === 'all' ? 'on' : '') + '" data-f="all">Tout</button>' +
       '<button class="chip ' + (prefs.filter === 'fav' ? 'on' : '') + '" data-f="fav">' + icon('star') + 'Favoris</button>' +
-      '<div class="spacer"></div><span class="count" id="count"></span>' +
+      '<div class="spacer"></div><span class="count" id="anaLeft"></span><span class="count" id="count"></span>' +
       '<select class="sort" id="sortSel">' + sorts.map(function (o) {
         return '<option value="' + o[0] + '"' + (prefs.sort === o[0] ? ' selected' : '') + '>Trier : ' + o[1] + '</option>';
       }).join('') + '</select>' +
@@ -903,7 +957,12 @@
       '<div class="list" id="list"></div>';
     bindLibraryHeader(v);
     var qi = $('#q');
-    qi.oninput = function () { state.query = qi.value; state.showLimit = 200; applyFilter(); };
+    var qTimer = null;
+    qi.oninput = function () {
+      state.query = qi.value; state.showLimit = 200;
+      clearTimeout(qTimer);
+      qTimer = setTimeout(applyFilter, 130);
+    };
     Array.prototype.forEach.call(v.querySelectorAll('[data-f]'), function (b) {
       b.onclick = function () { prefs.filter = b.getAttribute('data-f'); savePrefs(); renderMusic(); applyFilter(); };
     });
@@ -989,6 +1048,11 @@
       if (e.target.closest('.cover')) { selectTrack(f, true); return; }
       selectTrack(f, false);
     });
+    // l'extrait In / Out du morceau chargé se prépare au survol de sa ligne, juste avant un éventuel glisser
+    list.addEventListener('mouseover', function (e) {
+      var row = e.target.closest('.row');
+      if (row && row.__file === state.current && currentIO(state.current.path)) buildExcerpt();
+    });
     list.addEventListener('dblclick', function (e) {
       var row = e.target.closest('.row');
       if (row && !e.target.closest('[data-act]') && !e.target.closest('.cover')) { if (!pb.playing) play(0); }
@@ -1003,6 +1067,19 @@
       e.dataTransfer.setData('com.adobe.cep.dnd.file.0', p);
       e.dataTransfer.setData('text/plain', p);
     });
+  }
+
+  /** ↑ / ↓ : morceau précédent / suivant de la liste affichée (la lecture continue si elle était en cours) */
+  function stepTrack(dir) {
+    if (prefs.tab !== 'music' || !state.list.length) return;
+    var i = state.list.indexOf(state.current);
+    var next = state.list[i < 0 ? (dir > 0 ? 0 : state.list.length - 1) : i + dir];
+    if (!next) return;
+    var wasPlaying = pb.playing;
+    if (state.list.indexOf(next) >= state.showLimit) { state.showLimit += 300; renderList(); }
+    selectTrack(next, wasPlaying);
+    var el = rowEls.get(next.path);
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
   }
 
   function updateRow(f) {
@@ -1139,7 +1216,9 @@
     if (hit) return hit;
     var name = Lib.basename(path), g = Lib.guessFromName(name), sfxDir = findCatDir('sfx');
     var inSfx = /sfx/i.test(Lib.dirname(path)) || (sfxDir && low.indexOf(String(sfxDir).replace(/\\/g, '/').toLowerCase()) === 0);
-    return { path: path, name: name, folder: Lib.dirname(path), title: g.title, artist: g.artist, cat: inSfx ? 'sfx' : 'music', size: Lib.fileSize(path), adhoc: true };
+    // même clé de cache que le scan (taille + date) : un clip hors bibliothèque n'est analysé qu'une fois
+    var st = Lib.statFile(path) || { size: -1, mtime: 0 };
+    return hydrate({ path: path, name: name, folder: Lib.dirname(path), cat: inSfx ? 'sfx' : 'music', size: st.size, mtime: st.mtime, adhoc: true });
   }
 
   /**
@@ -1160,6 +1239,10 @@
       toast('Le clip « ' + r.name + ' » est à ' + Math.round(r.speed * 100) + ' % de vitesse : remettez-le à 100 % pour lui appliquer une fin.', 'err');
       return;
     }
+    if (!Lib.isAudioPath(r.path)) {
+      if (!auto) toast('« ' + r.name + ' » n\'est pas un fichier audio (' + (Lib.extname(r.path) || 'sans extension') + ') : Ongaku ne retravaille que la musique et les sons.', 'err');
+      return;
+    }
     if (!Lib.exists(r.path)) { if (!auto) toast('Fichier du clip introuvable : ' + r.path, 'err'); return; }
     var f = fileForPath(r.path);
     selectTrack(f, false, function () {
@@ -1178,9 +1261,9 @@
   /**
    * Suivi de la sélection de la timeline : dès qu'un clip audio est sélectionné, il est chargé et
    * l'onglet Fins s'ouvre ; quand plus rien n'est sélectionné, retour à la Bibliothèque.
-   * Relecture légère toutes les 0,5 s, seulement quand le panneau est visible.
+   * Relecture légère (0,4 s avec un clip suivi, 0,9 s au repos), seulement quand le panneau est visible.
    */
-  var selWatch = { key: null, busy: false, timer: null, playhead: null };
+  var selWatch = { key: null, pending: null, busy: false, timer: null, playhead: null };
   /** Position dans le fichier qui correspond à la tête de lecture de la séquence (bornée au clip) */
   function clipSourceTime(r, playhead) {
     var t = r.inPoint + (playhead - r.start);
@@ -1205,14 +1288,23 @@
           }
           return;
         }
+        // un clip n'est chargé que s'il est encore sélectionné au passage suivant : cliquer vite de clip
+        // en clip dans la timeline ne lance pas un décodage par clic
+        if (key && selWatch.pending !== key) { selWatch.pending = key; return; }
+        selWatch.pending = null;
         var first = selWatch.key === null;
         selWatch.key = key;
         if (key) loadTimelineClip(r, true);
         else if (!first && prefs.tab === 'fins') { prefs.tab = 'music'; renderTabs(); renderView(); drawMain(); }
       }, function () { selWatch.busy = false; });
     };
-    tick();
-    selWatch.timer = setInterval(tick, 500);
+    // 0,4 s quand un clip est suivi ou en attente (tête de lecture à suivre), 0,9 s au repos : moins d'appels à Premiere
+    var loop = function () {
+      if (closing) return;
+      tick();
+      selWatch.timer = setTimeout(loop, selWatch.key || selWatch.pending ? 400 : 900);
+    };
+    loop();
   }
   function timelineClipActive() {
     var tc = state.timelineClip, f = state.current;
@@ -1269,7 +1361,7 @@
     var io = currentIO(f.path);
     if (!io) return;
     var key = excerptKey(f, io);
-    if (excerpt.key === key && excerpt.path) return;
+    if (excerpt.key === key) return; // déjà prêt, ou en cours d'écriture
     // l'extrait précédent n'a jamais été glissé : on le supprime pour ne pas encombrer le dossier du projet
     if (excerpt.path && !excerpt.used && excerpt.created) Lib.removeFile(excerpt.path);
     excerpt.key = key; excerpt.path = null; excerpt.used = false; excerpt.created = false;
@@ -1283,7 +1375,11 @@
     }).then(function () {
       if (excerpt.key === key) excerpt.created = true; else Lib.removeFile(p); // In / Out a bougé pendant l'écriture
       done();
-    }).catch(function (e) { toast('Extrait impossible : ' + (e && e.message ? e.message : e), 'err'); });
+    }).catch(function (e) {
+      if (excerpt.key === key) excerpt.key = null;
+      refreshDragLabel();
+      toast('Extrait impossible : ' + (e && e.message ? e.message : e), 'err');
+    });
   }
   /**
    * Chemin à glisser : extrait In / Out s'il est prêt ; sinon, en mode « copier », la copie dans le
@@ -1314,7 +1410,8 @@
     var el = $('#dragCur');
     if (!el || !state.current) return;
     var io = currentIO(state.current.path);
-    el.innerHTML = icon('grip') + (io ? (excerpt.path && excerpt.key === excerptKey(state.current, io) ? 'Glisser l\'extrait' : 'Extrait…') : 'Glisser');
+    var writing = io && excerpt.key === excerptKey(state.current, io) && !excerpt.path;
+    el.innerHTML = icon('grip') + (io ? (writing ? 'Extrait…' : 'Glisser l\'extrait') : 'Glisser');
     el.title = io ? 'Glisser l\'extrait In → Out vers la timeline' : 'Glisser vers la timeline ou le projet';
     var pl = $('#btnPlace');
     if (pl) pl.title = io ? 'Placer l\'extrait In → Out à la tête de lecture' : 'Placer sur la timeline à la tête de lecture';
@@ -2131,8 +2228,8 @@
   function registerShortcuts() {
     if (!window.__adobe_cep__ || !window.__adobe_cep__.registerKeyEventsInterest) return;
     var mac = navigator.platform.indexOf('Mac') === 0;
-    // Espace, I, O, X, flèche gauche, flèche droite, Échap
-    var codes = mac ? [49, 34, 31, 7, 123, 124, 53] : [32, 73, 79, 88, 37, 39, 27];
+    // Espace, I, O, X, flèches gauche / droite / haut / bas, Échap
+    var codes = mac ? [49, 34, 31, 7, 123, 124, 126, 125, 53] : [32, 73, 79, 88, 37, 39, 38, 40, 27];
     try { window.__adobe_cep__.registerKeyEventsInterest(JSON.stringify(codes.map(function (c) { return { keyCode: c }; }))); } catch (e) {}
   }
 
@@ -2166,6 +2263,7 @@
       if (isSpace(e)) { e.preventDefault(); if (!e.repeat) toggle(); }
       else if (e.code === 'ArrowRight' && activeBuffer()) seek(position() + 5);
       else if (e.code === 'ArrowLeft' && activeBuffer()) seek(position() - 5);
+      else if (e.code === 'ArrowDown' || e.code === 'ArrowUp') { e.preventDefault(); stepTrack(e.code === 'ArrowDown' ? 1 : -1); }
       else if (e.code === 'KeyI') markIn();
       else if (e.code === 'KeyO') markOut();
       else if (e.code === 'KeyX') clearInOut();

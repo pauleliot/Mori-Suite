@@ -1,3 +1,10 @@
+1.9.1
+- Analyse bien plus rapide et sans à-coups : elle tourne en arrière-plan, deux fichiers à la fois ; les WAV sont lus directement (environ 4 fois plus vite) et les SFX ne calculent que leur forme d'onde.
+- Lecteur plus fluide : la forme d'onde n'est plus redessinée à chaque image.
+- Un rush vidéo sélectionné dans la timeline n'est plus chargé (seuls les fichiers audio le sont).
+- L'extrait In / Out n'est écrit sur le disque qu'au moment de le glisser.
+- Flèches haut / bas : morceau précédent / suivant ; recherche plus réactive sur les grosses bibliothèques.
+
 1.9.0
 - Fins : sélectionnez une musique dans la timeline, elle s'ouvre directement dans Ongaku avec la partie utilisée ; « Rendre & remplacer le clip » pose la fin à sa place exacte (sur une piste libre si la queue déborde sur le clip suivant).
 - La tête de lecture d'Ongaku suit celle de Premiere sur le clip sélectionné.
