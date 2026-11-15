@@ -1,3 +1,9 @@
+1.5.0
+- Nouveau fonctionnement : Sori liste toutes les propriétés animées du clip sélectionné (Trajectoire, Opacité, Transformation, autres effets) avec une case à cocher, et pose la courbe entre les deux images clés autour de la tête de lecture. Vos clés d'origine ne sont jamais modifiées et aucun effet n'est ajouté.
+- Réappliquer une autre courbe sur la même paire remplace celle de Sori ; un bouton recharge la courbe déjà appliquée.
+- Flou de mouvement : Sori ajoute l'effet Flou directionnel et l'anime (0 au départ, la valeur choisie au plus rapide, 0 à l'arrivée), dans la direction du mouvement. Compatible avec le nouveau Flou directionnel de Premiere 2025.
+- Les clés ajoutées dans Premiere apparaissent presque instantanément ; lecture du clip plus légère.
+
 1.3.0
 - Apparence : police de l'interface au choix (Urbanist, Space Grotesk, Inter) ou police importée, commune à Mori, Ongaku, Sori et Kiru.
 - Mises à jour : le panneau propose lui-même les nouvelles versions.

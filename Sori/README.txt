@@ -5,9 +5,9 @@ Ouvrir : Premiere Pro > Fenêtre > Extensions > Sori — Courbes
 (sori, 反り : la courbure d'une lame ; le mode débogage CEP « PlayerDebugMode = 1 » est déjà activé sur ce poste.)
 
 PRINCIPE
-  Premiere n'expose pas les poignées de Bézier de ses images clés en script. Sori « cuit » donc la courbe :
-  entre vos images clés d'origine (départ / arrivée), il pose des images clés linéaires qui suivent la courbe.
-  Les valeurs des clés d'origine ne changent jamais ; seul le rythme entre elles change.
+  Premiere n'expose pas les poignées de Bézier de ses images clés en script. Sori pose donc, entre deux de vos
+  images clés, des images clés linéaires qui suivent la courbe. Vos deux clés ne changent jamais ; seul le
+  rythme entre elles change. Aucun effet n'est ajouté (sauf le Flou directionnel, si l'option est cochée).
 
 ONGLET COURBE
   - Vue Valeur (amplitude, 0 → 100 %) ou Vitesse (× la vitesse moyenne ; 1× = mouvement linéaire). Touche V.
@@ -15,35 +15,34 @@ ONGLET COURBE
   - Double-clic sur la courbe = sous-clé (subdivision de De Casteljau : la courbe reste identique au pixel près).
     Double-clic sur une sous-clé ou Suppr = la retirer. Chaque valeur de la barre d'info se modifie au clic
     (temps, valeur, influence et vitesse d'entrée / sortie).
-  - Si des clips animés sont sélectionnés, la grille passe en images (durée entre leurs 2 premières clés) :
+  - Si un clip animé est sélectionné, la grille passe en images (durée de la paire de clés visée) :
     pratique pour caler une sous-clé sur un cut ou un SFX. Les sous-clés s'aimantent aux images (Maj = libre).
   - Ctrl+Z / Ctrl+Maj+Z : annuler / rétablir. Signet = enregistrer comme preset. Clic sur le cubic-bezier = copier.
 
 APPLIQUER (Ctrl+Entrée)
-  - Propriétés : toutes celles qui sont animées (au moins 2 images clés) sur les clips sélectionnés :
-    Position, Échelle (+ largeur si non uniforme), Rotation, Opacité. Premiere ne permet pas à un script de
-    savoir quelles propriétés sont sélectionnées dans les Options d'effet.
-  - La courbe s'applique entre chaque paire de clés consécutives.
-  - Flou de mouvement (activé par défaut) : on pose ses clés sur la Trajectoire comme d'habitude ;
-    au clic sur « Appliquer », Sori ajoute l'effet Transformation, y recopie les clés avec leurs valeurs
-    absolues (et les valeurs fixes, ex. clip 4K réduit à 50 %), règle l'angle d'obturation (Faible 90°,
-    Moyen 180°, Élevé 360°) et remet la Trajectoire à zéro (centrée, 100 %, 0°).
-    « Appliquer » travaille ensuite directement sur les clés de Transformation.
-  - Densité des clés (Réglages > Injection) : Légère (défaut, écart ≤ 1,2 % : ~8 clés pour 1 s),
-    Précise (≤ 0,3 %), Chaque image. Premiere ne permet pas de régler influence / vitesse des poignées en
-    script (seulement le type de clé) : 2 clés Bézier réglées par Sori sont impossibles.
-  - Changer la courbe d'un clip déjà traité : sélectionnez-le, sa courbe revient dans l'éditeur ; modifiez-la
-    puis « Appliquer » : les images clés sont recalculées à partir des clés d'origine.
-  - Annuler (bouton à côté d'Appliquer, ou Ctrl+Z quand le panneau Sori est actif) : remet les clips exactement
-    comme avant la dernière application (10 niveaux), même si la sélection a changé. À préférer au Ctrl+Z de
-    Premiere, qui peut faire planter Premiere après une modification par script. Un effet Transformation ajouté
-    par Sori est remis au neutre (aucun changement à l'image) et réutilisé ensuite ; on peut le supprimer à la main.
-  - La sélection n'est relue que lorsque la souris est sur le panneau : pendant le travail dans la timeline
-    (Ctrl+Z…), Sori n'interroge pas Premiere.
-  - Boucle jusqu'à la fin : Cycle ou Ping-pong jusqu'au dernier plan du clip.
-  - Réappliquer une autre courbe sur un clip déjà traité fonctionne : Sori mémorise les clés d'origine
-    tant que la première et la dernière clé cuites n'ont pas bougé.
-    Réglages > Injection > « Oublier les clés mémorisées » pour repartir de ce qui est dans Premiere.
+  - Sori liste toutes les propriétés animées (au moins 2 images clés) du 1er clip sélectionné, quel que soit
+    l'effet (Trajectoire, Opacité, Transformation, effets tiers), avec une case à cocher. Chaque ligne indique
+    la paire de clés visée (« img 30 → 50 ») : celle qui entoure la tête de lecture, sinon la plus proche.
+  - « Appliquer » pose les clés de la courbe entre ces deux clés, sur chaque propriété cochée.
+  - Changer de courbe : réappliquer sur la même paire remplace les clés posées par Sori (il note celles qu'il a
+    posées ; elles ne comptent pas comme des clés d'origine). Le bouton à droite d'une ligne recharge la courbe
+    déjà appliquée à cette propriété.
+  - Flou de mouvement (option) : Premiere ne floute pas les animations de la Trajectoire. Sori ajoute l'effet
+    « Flou directionnel » au clip et l'anime, pour chaque paire de clés de Position : 0 sur la clé de départ,
+    la valeur choisie à l'image la plus rapide, 0 sur la clé d'arrivée ; direction = celle du déplacement.
+    Valeur : Faible 2, Moyen 5, Élevé 10, ou libre de 0,1 à 100. Elle s'applique à la paire la plus rapide ;
+    les paires plus lentes reçoivent une valeur proportionnelle à leur vitesse. Deux effets existent selon la
+    version de Premiere : le classique (Direction / Longueur du flou, en pixels) et celui de Premiere 2025
+    (AE.Impact_Directional_Blur_FX : Angle / Quantité, de 0 à 100) ; Sori reconnaît les deux.
+    Position visée : celle de la Trajectoire si elle est cochée, sinon une autre position cochée. C'est une
+    imitation : correcte pour un déplacement, sans effet sur l'Échelle ou la Rotation.
+  - Densité des clés (Réglages > Injection) : Légère (défaut, écart ≤ 1,2 %), Précise (≤ 0,3 %), Chaque image.
+  - Annuler (bouton à côté d'Appliquer, ou Ctrl+Z quand le panneau Sori est actif) : remet les images clés comme
+    avant la dernière application (10 niveaux). À préférer au Ctrl+Z de Premiere, qui peut faire planter Premiere
+    après une modification par script. Un Flou directionnel ajouté par Sori est remis à 0 ; on peut le
+    supprimer à la main.
+  - Le clip est relu 3 fois par seconde quand la souris est sur le panneau, toutes les 1,2 s sinon ; la cadence
+    ralentit si Premiere répond lentement. Premiere ne renvoie les clés que lorsqu'elles ont changé.
 
 ONGLET BIBLIOTHÈQUE
   - Presets : Linéaire, Ease, Ease In / Out / In-Out, Smooth, Cubic, Quint, Expo, Back (overshoot),

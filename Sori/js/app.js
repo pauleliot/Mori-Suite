@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.3.0'; // à garder identique à CSXS/manifest.xml
+  var APP_VERSION = '1.5.0'; // à garder identique à CSXS/manifest.xml
   var C = window.SoriCurve, Suite = window.SuiteTheme;
   var cs = new CSInterface();
   var inCEP = !!window.__adobe_cep__;
@@ -50,34 +50,35 @@
   function icon(name, cls) { return '<svg class="i ' + (cls || '') + '" viewBox="0 0 24 24">' + (ICONS[name] || '') + '</svg>'; }
 
   // ==================== Préférences ====================
-  var PREFS_KEY = 'sori.prefs.v1', MEMO_KEY = 'sori.memo.v1';
+  var PREFS_KEY = 'sori.prefs.v1';
   var DENSITY_LABELS = { light: 'Légère', adaptive: 'Précise', frame: 'Chaque image' };
-  /** Flou de mouvement : angle d'obturation de l'effet Transformation */
-  var BLUR_ANGLES = { low: 90, mid: 180, high: 360 };
-  function blurLevel() { var a = prefs.autoTr.angle; return a <= 120 ? 'low' : a <= 270 ? 'mid' : 'high'; }
+  /** Flou directionnel : valeur de l'effet (Quantité / Longueur du flou) au moment le plus rapide ; niveaux prédéfinis */
+  var BLUR_LEVELS = { low: 2, mid: 5, high: 10 };
   var DEFAULT_PREFS = {
     tab: 'curve', view: 'value',
     curve: null, curveName: 'Ease In-Out', curveId: 'ease-in-out', edited: false,
     density: 'light',
-    autoTr: { on: true, angle: 180 },
-    loop: { on: false, mode: 'cycle' },
-    presets: [], autoSel: true, memo: true
+    dblur: { on: false, peak: 5 },
+    presets: [], autoSel: true
   };
   var prefs = (function () {
     var p = JSON.parse(JSON.stringify(DEFAULT_PREFS));
     try {
       var s = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
       Object.keys(s).forEach(function (k) {
-        if (k === 'autoTr' || k === 'loop') Object.assign(p[k], s[k]); else p[k] = s[k];
+        if (k === 'dblur') Object.assign(p[k], s[k]); else p[k] = s[k];
       });
-      // v1.0 : « Flou de mouvement » -> Transformation auto ; densité « 1 sur 2 » retirée
-      if (s.blur && !s.autoTr) p.autoTr.angle = s.blur.angle || 180;
-      delete p.blur; delete p.mode; delete p.stagger; delete p.props;
+      // réglages des versions 1.x (Transformation automatique, boucle, mémoire des clés)
+      delete p.blur; delete p.mode; delete p.stagger; delete p.props; delete p.autoTr; delete p.loop; delete p.memo;
+      // versions 1.4 : intensité en % de la vitesse -> valeur directe
+      if (typeof p.dblur.peak !== 'number' || !isFinite(p.dblur.peak) || p.dblur.peak <= 0) p.dblur.peak = 5;
+      delete p.dblur.level; delete p.dblur.amount;
       if (!DENSITY_LABELS[p.density]) p.density = 'light';
     } catch (e) {}
     if (!Array.isArray(p.presets)) p.presets = [];
     return p;
   })();
+  function blurLevel() { var a = prefs.dblur.peak; return a === BLUR_LEVELS.low ? 'low' : a === BLUR_LEVELS.mid ? 'mid' : a === BLUR_LEVELS.high ? 'high' : ''; }
   function savePrefs() { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (e) {} }
   /** Apparence modifiée dans Sori : écrite aussi dans le fichier partagé (repris par Mori et Ongaku) */
   function saveAppearance() {
@@ -95,7 +96,9 @@
   var state = {
     sel: null, selTimer: null, applying: false, hover: false, applyUndo: [], lastAction: 'edit',
     selected: -1, history: [], future: [],
-    refFrames: 0, fps: 25
+    refFrames: 0, fps: 25,
+    raw: null, stamp: 0, selKey: '', scanMs: 0, // dernière lecture complète du clip (voir takeScan)
+    unchecked: {} // propriétés décochées dans la liste (clé : effet|n° du paramètre)
   };
 
   // ==================== Utilitaires ====================
@@ -138,7 +141,7 @@
   }
 
   // ==================== Pont Premiere (ExtendScript) ====================
-  var JSX_REV = 12; // = rev de jsx/Sori_Premiere.jsx : le script hôte est rechargé s'il est plus ancien
+  var JSX_REV = 20; // = rev de jsx/Sori_Premiere.jsx : le script hôte est rechargé s'il est plus ancien
   var JSX_PATH =decodeURIComponent(location.pathname).replace(/^\/([A-Za-z]:)/, '$1').replace(/\/[^\/]*$/, '') + '/jsx/Sori_Premiere.jsx';
   function esLit(v) {
     return JSON.stringify(v).replace(/[^\x00-\x7e]/g, function (c) { return '\\u' + ('0000' + c.charCodeAt(0).toString(16)).slice(-4); });
@@ -604,14 +607,6 @@
     }).join('') + '</select></label>';
   }
 
-  var PROPS = [
-    { id: 'position', label: 'Position', icon: 'move' },
-    { id: 'scale', label: 'Échelle', icon: 'scale' },
-    { id: 'rotation', label: 'Rotation', icon: 'rotate' },
-    { id: 'opacity', label: 'Opacité', icon: 'opacity' }
-  ];
-  var PROP_LABEL = { position: 'Position', scale: 'Échelle', scaleWidth: 'Largeur', rotation: 'Rotation', opacity: 'Opacité' };
-
   // ---------- Onglet Courbe ----------
   function renderCurve() {
     var v = $('#view');
@@ -635,16 +630,14 @@
         '</div>' +
       '</section>' +
       '<section class="card apply">' +
-        '<div class="opt-rows">' +
-          '<div class="opt-row" title="Au clic sur Appliquer : l\'animation passe sur l\'effet Transformation (flou de mouvement) et la Trajectoire est remise à zéro">' +
-            toggle('autoTr', prefs.autoTr.on, icon('wind') + 'Flou de mouvement') +
-            '<div class="opt-extra' + (prefs.autoTr.on ? '' : ' off') + '">' + seg('blurLevel', blurLevel(), [['low', 'Faible'], ['mid', 'Moyen'], ['high', 'Élevé']]) + '</div></div>' +
-          '<div class="opt-row">' + toggle('loop', prefs.loop.on, icon('repeat') + 'Boucle jusqu\'à la fin') +
-            '<div class="opt-extra' + (prefs.loop.on ? '' : ' off') + '">' + seg('loopMode', prefs.loop.mode, [['cycle', 'Cycle'], ['pingpong', 'Ping-pong']]) + '</div></div>' +
-        '</div>' +
+        '<div class="opt-rows"><div class="opt-row" title="Ajoute l\'effet Flou directionnel au clip et l\'anime selon la vitesse et la direction du déplacement (Position de la Trajectoire)">' +
+          toggle('dblur', prefs.dblur.on, icon('wind') + 'Flou de mouvement') +
+          '<div class="opt-extra' + (prefs.dblur.on ? '' : ' off') + '">' + seg('blurLevel', blurLevel(), [['low', 'Faible'], ['mid', 'Moyen'], ['high', 'Élevé']]) +
+            '<label class="amt" title="Valeur du flou au moment le plus rapide du mouvement (0,1 à 100) : 0 sur la clé de départ, cette valeur au plus rapide, 0 sur la clé d’arrivée"><input id="blurAmount" value="' + num(prefs.dblur.peak, 1) + '" maxlength="5"/></label></div></div></div>' +
+        '<div class="prop-list" id="propList" hidden></div>' +
         '<div class="apply-row"><div class="sel-line" id="selLine"></div>' +
           '<button class="btn-ghost undo-apply" id="btnUndoApply">' + icon('undo') + '<span>Annuler</span></button>' +
-          '<button class="btn-primary big" id="btnApply" title="Appliquer la courbe aux clips sélectionnés (Ctrl+Entrée)">' + icon('zap') + '<span>Appliquer</span></button></div>' +
+          '<button class="btn-primary big" id="btnApply" title="Pose les images clés de la courbe sur les propriétés cochées (Ctrl+Entrée)">' + icon('zap') + '<span>Appliquer</span></button></div>' +
       '</section>' +
       '</div>';
 
@@ -660,8 +653,7 @@
         b.onclick = function () {
           var val = b.getAttribute('data-v');
           if (id === 'view') { prefs.view = val; G.range = null; }
-          else if (id === 'blurLevel') prefs.autoTr.angle = BLUR_ANGLES[val];
-          else if (id === 'loopMode') prefs.loop.mode = val;
+          else if (id === 'blurLevel') { prefs.dblur.peak = BLUR_LEVELS[val]; $('#blurAmount').value = num(prefs.dblur.peak, 1); }
           savePrefs();
           $$('button', s).forEach(function (x) { x.classList.toggle('on', x === b); });
           if (id === 'view') drawGraph();
@@ -679,6 +671,17 @@
         savePrefs();
       };
     });
+
+    var amt = $('#blurAmount');
+    amt.onkeydown = function (e) { e.stopPropagation(); if (e.key === 'Enter') amt.blur(); };
+    amt.onchange = function () {
+      var x = parseFloat(String(amt.value).replace(',', '.'));
+      if (isFinite(x)) prefs.dblur.peak = Math.round(C.clamp(x, 0.1, 100) * 10) / 10;
+      amt.value = num(prefs.dblur.peak, 1);
+      savePrefs();
+      var lv = blurLevel();
+      $$('[data-seg="blurLevel"] button', v).forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-v') === lv); });
+    };
 
     $('#btnUndo').onclick = undo;
     $('#btnRedo').onclick = redo;
@@ -709,44 +712,166 @@
     renderUndoBtn();
   }
 
-  // ---------- Barre de sélection ----------
+  // ==================== Clip sélectionné : propriétés animées ====================
+  /**
+   * Principe (comme OpenCurve) : Sori liste toutes les propriétés animées du clip sélectionné. Pour chaque propriété
+   * cochée, « Appliquer » pose des images clés entre les deux clés qui entourent la tête de lecture, en suivant la
+   * courbe. Rien d'autre n'est touché : ni les deux clés d'origine, ni les autres effets.
+   * Sori note les clés qu'il a posées (REC_KEY) : elles ne comptent pas comme des clés d'origine, ce qui permet de
+   * réappliquer une autre courbe sur la même paire.
+   */
+  var REC_KEY = 'sori.bakes.v1';
+  var recsCache = null;
+  function loadRecs() {
+    if (!recsCache) { try { recsCache = JSON.parse(localStorage.getItem(REC_KEY) || '{}'); } catch (e) { recsCache = {}; } }
+    return recsCache;
+  }
+  function saveRecs(r) {
+    recsCache = r;
+    var ids = Object.keys(r);
+    if (ids.length > 800) {
+      ids.sort(function (a, b) { return (r[a].at || 0) - (r[b].at || 0); });
+      ids.slice(0, ids.length - 800).forEach(function (k) { delete r[k]; });
+    }
+    try { localStorage.setItem(REC_KEY, JSON.stringify(r)); } catch (e) {}
+  }
+
+  function lerp(a, b, u) {
+    if (typeof a === 'number') return a + (b - a) * u;
+    return a.map(function (x, i) { return x + (b[i] - x) * u; });
+  }
+  function near(a, b, tpf) { return Math.abs(a - b) <= Math.max(2, tpf * 0.25); }
+  function hasTime(keys, t, tpf) { return keys.some(function (k) { return near(k.t, t, tpf); }); }
+
+  function propKey(p) { return p.match + '|' + p.pi; }
+  function recId(clipId, p) { return clipId + '|' + propKey(p); }
+  function propLabel(p) { return (p.name || 'Paramètre ' + (p.pi + 1)) + (p.comp ? ' (' + p.comp + ')' : ''); }
+
+  /**
+   * Complète chaque propriété lue dans Premiere :
+   *  - orig : ses clés d'origine (celles que Sori n'a pas posées) ;
+   *  - pair : les deux clés d'origine autour de la tête de lecture (sinon la paire la plus proche) ;
+   *  - inner : les clés actuellement entre les deux (posées par Sori) ; baked : la courbe utilisée pour elles.
+   */
+  function analyse(r) {
+    var clip = r.clip, tpf = r.seq.ticksPerFrame, recs = loadRecs();
+    var local = r.seq.playhead - clip.start + clip.inPoint;
+    r.blurProps = r.props.filter(function (p) { return p.role; });
+    r.props = r.props.filter(function (p) { return !p.role; });
+    r.props.forEach(function (p) {
+      var rec = recs[recId(clip.id, p)], alive = [];
+      if (rec) alive = rec.bakes.filter(function (b) {
+        if (!hasTime(p.keys, b.t0, tpf) || !hasTime(p.keys, b.t1, tpf)) return false;
+        var found = b.times.filter(function (t) { return hasTime(p.keys, t, tpf); }).length;
+        return found * 2 >= b.times.length;
+      });
+      p.orig = p.keys.filter(function (k) {
+        return !alive.some(function (b) { return b.times.some(function (t) { return near(t, k.t, tpf); }); });
+      });
+      p.alive = alive;
+      p.pair = null;
+      var best = -1, bd = Infinity, o = p.orig;
+      for (var i = 0; i < o.length - 1; i++) {
+        if (o[i + 1].t - o[i].t < tpf * 1.5) continue; // clés collées : rien à poser entre les deux
+        var d = local < o[i].t ? o[i].t - local : local > o[i + 1].t ? local - o[i + 1].t : 0;
+        if (d < bd) { bd = d; best = i; }
+      }
+      if (best < 0) return;
+      var a = o[best], b = o[best + 1];
+      p.pair = { a: a, b: b, frames: Math.round((b.t - a.t) / tpf), from: Math.round((a.t - clip.inPoint) / tpf) };
+      p.inner = p.keys.filter(function (k) { return k.t > a.t + tpf / 4 && k.t < b.t - tpf / 4; });
+      p.baked = alive.filter(function (x) { return near(x.t0, a.t, tpf) && near(x.t1, b.t, tpf); })[0] || null;
+    });
+    r.props = r.props.filter(function (p) { return p.pair; });
+    return r;
+  }
+
+  function checkedProps() {
+    var s = state.sel;
+    if (!s || !s.clip) return [];
+    return s.props.filter(function (p) { return !state.unchecked[propKey(p)]; });
+  }
+
+  // ---------- Barre de sélection + liste des propriétés ----------
   function renderSelLine() {
     var el = $('#selLine');
     if (!el) return;
+    renderProps();
     if (!inCEP) { el.innerHTML = '<span class="dot"></span>Hors de Premiere Pro'; return; }
     var s = state.sel;
     if (!s) { el.innerHTML = '<span class="dot"></span>Lecture de la sélection…'; return; }
     if (!s.seq) { el.innerHTML = '<span class="dot"></span>Aucune séquence active.'; return; }
-    if (!s.clips.length) { el.innerHTML = '<span class="dot"></span>Sélectionnez des clips animés.'; return; }
-    var chosen = PROPS; // toutes les propriétés animées
-    var ready = 0, parts = [];
-    chosen.forEach(function (p) {
-      var n = s.clips.filter(function (c) { return (c.counts[p.id] || 0) >= 2; }).length;
-      if (n) { ready += n; parts.push('<b>' + p.label + '</b>' + (s.clips.length > 1 ? ' ' + n : '')); }
+    if (!s.clip) { el.innerHTML = '<span class="dot"></span>Sélectionnez un clip animé.'; return; }
+    var n = checkedProps().length;
+    el.innerHTML = '<span class="dot ' + (n ? 'on' : '') + '"></span><b class="clip-name">' + esc(s.clip.name) + '</b>' +
+      (s.total > 1 ? '<span class="warn">1er de ' + s.total + ' clips</span>' : '') +
+      (s.props.length ? '' : '<span class="warn">aucune propriété avec 2 images clés</span>');
+  }
+
+  function renderProps() {
+    var el = $('#propList');
+    if (!el) return;
+    var s = state.sel, props = s && s.clip ? s.props : [];
+    var html = props.map(function (p, i) {
+      var on = !state.unchecked[propKey(p)];
+      return '<div class="prop-row' + (on ? ' on' : '') + '" data-i="' + i + '">' +
+        '<span class="cb">' + (on ? icon('check') : '') + '</span>' +
+        '<span class="p-name" title="' + esc(propLabel(p)) + '">' + esc(p.name || 'Paramètre ' + (p.pi + 1)) + '<i>' + esc(p.comp) + '</i></span>' +
+        '<span class="p-pair" title="Les deux images clés entre lesquelles la courbe est posée (autour de la tête de lecture)">img ' + p.pair.from + ' → ' + (p.pair.from + p.pair.frames) + '</span>' +
+        (p.baked ? '<button class="mini-btn" data-load="' + i + '" title="Reprendre la courbe déjà appliquée ici (' + esc(p.baked.curveName || 'courbe') + ')">' + icon('spline') + '</button>' : '<span class="mini-gap"></span>') +
+        '</div>';
+    }).join('');
+    if (html === el._html) return;
+    el._html = html;
+    el.innerHTML = html;
+    el.hidden = !html;
+    $$('.prop-row', el).forEach(function (row) {
+      row.onclick = function (e) {
+        var p = props[Number(row.getAttribute('data-i'))];
+        if (e.target.closest('[data-load]')) {
+          var b = p.baked;
+          try { if (C.validCurve(b.curve)) loadCurve(C.fromPoints(b.curve.points), b.curveName || 'Courbe du clip', b.curveId || ''); } catch (e2) {}
+          return;
+        }
+        var k = propKey(p);
+        if (state.unchecked[k]) delete state.unchecked[k]; else state.unchecked[k] = true;
+        updateRefFrames();
+        renderSelLine();
+      };
     });
-    var total = s.total || s.clips.length;
-    el.innerHTML = '<span class="dot ' + (ready ? 'on' : '') + '"></span>' + total + ' clip' + (total > 1 ? 's' : '') +
-      (parts.length ? ' · ' + parts.join(' · ') : ' · <span class="warn">rien d\'animé (2 clés min.)</span>');
+  }
+
+  /** Échelle de temps de l'éditeur : durée de la paire de la 1re propriété cochée */
+  function updateRefFrames() {
+    var c = checkedProps(), frames = c.length ? c[0].pair.frames : 0;
+    if (frames !== state.refFrames) { state.refFrames = frames; drawGraph(); renderInfo(); }
+  }
+
+  /** Garde la dernière lecture complète ; Premiere ne renvoie les clés que si elles ont changé (stamp) */
+  function takeScan(r) {
+    if (!r.clip) { state.raw = null; state.stamp = 0; return r; }
+    if (r.same && state.raw) { r.props = state.raw.props; r.motion = state.raw.motion; }
+    else { state.raw = { props: r.props || [], motion: r.motion }; state.stamp = r.stamp || 0; r.props = state.raw.props; }
+    return analyse(r);
   }
 
   function refreshSelection() {
     if (!inCEP || state.applying || state.reading || G.drag || document.hidden || closing) return;
     state.reading = true;
-    jsx('summary').then(function (r) {
+    var t0 = Date.now();
+    jsx('scan', [false, state.stamp]).then(function (r) {
       state.reading = false;
+      state.scanMs = Date.now() - t0;
       if (!r || !r.success) return;
-      state.sel = r;
-      // échelle de temps de l'éditeur : durée entre les 2 premières clés du 1er clip
-      var tpf = r.seq && r.seq.ticksPerFrame, frames = 0;
-      if (tpf) state.fps = TICKS / tpf;
-      if (tpf && r.clips.length) {
-        var sp = r.clips[0].spans || {};
-        for (var i = 0; i < PROPS.length && !frames; i++) if (sp[PROPS[i].id]) frames = Math.round(sp[PROPS[i].id] / tpf);
-        if (!frames) Object.keys(sp).some(function (k) { frames = Math.round(sp[k] / tpf); return frames > 0; });
-      }
-      if (frames !== state.refFrames) { state.refFrames = frames; drawGraph(); renderInfo(); }
+      // rien n'a bougé (mêmes clés, même clip, même tête de lecture) : l'affichage est déjà à jour
+      var key = r.clip ? r.stamp + '|' + r.clip.id + '|' + r.clip.start + '|' + r.clip.inPoint + '|' + r.seq.playhead + '|' + r.total : r.seq ? 'vide' : 'sans';
+      if (r.same && state.raw && key === state.selKey) return;
+      if (r.same && !state.raw) { state.stamp = 0; return; } // lecture perdue : la prochaine sera complète
+      state.selKey = key;
+      if (r.seq) state.fps = TICKS / r.seq.ticksPerFrame;
+      state.sel = takeScan(r);
+      updateRefFrames();
       renderSelLine();
-      syncClipCurve(r);
     });
   }
 
@@ -757,182 +882,93 @@
   function panelActive() { return state.hover || document.hasFocus(); }
   function watchSelection() {
     if (!inCEP) return;
-    clearInterval(state.selTimer);
+    clearTimeout(state.selTimer);
     refreshSelection();
-    state.selTimer = setInterval(function () { if (prefs.autoSel && panelActive()) refreshSelection(); }, 2000);
+    // souris sur le panneau : relu 3 fois par seconde (une clé ajoutée apparaît tout de suite) ; sinon toutes les 1,2 s.
+    // Si Premiere met du temps à répondre (gros projet, lecture en cours), la cadence ralentit d'autant.
+    var loop = function () {
+      var wait = Math.max(panelActive() ? 300 : 1200, (state.scanMs || 0) * 6);
+      state.selTimer = setTimeout(function () { if (prefs.autoSel) refreshSelection(); loop(); }, wait);
+    };
+    loop();
     var root = document.documentElement;
     root.addEventListener('mouseenter', function () { state.hover = true; refreshSelection(); });
     root.addEventListener('mouseleave', function () { state.hover = false; });
     window.addEventListener('focus', function () { refreshSelection(); });
   }
 
-  // ==================== Courbe du clip sélectionné ====================
-  /**
-   * Un clip déjà traité par Sori : sa courbe revient dans l'éditeur dès qu'il est sélectionné. On la retouche,
-   * « Appliquer » recalcule les images clés à partir des clés d'origine (mémorisées).
-   */
-  function syncClipCurve(r) {
-    var c = r.clips && r.clips[0], id = c ? c.id : '';
-    if (id === state.clipId) return;
-    state.clipId = id;
-    if (!id || !prefs.memo) return;
-    var memo = loadMemo(), best = null;
-    Object.keys(memo).forEach(function (k) {
-      var m = memo[k];
-      if (k.indexOf(id + '|') === 0 && m.curve && (!best || m.at > best.at)) best = m;
-    });
-    if (!best) return;
-    try { if (!C.validCurve(best.curve)) return; } catch (e) { return; }
-    if (JSON.stringify(best.curve) === JSON.stringify(C.serialize(curve))) return;
-    loadCurve(C.fromPoints(best.curve.points), best.curveName || 'Courbe du clip', best.curveId || '');
-    toast('Courbe de « ' + c.name + ' » rechargée : modifiez-la puis Appliquer.');
-  }
-
   // ==================== Injection ====================
-  function loadMemo() { try { return JSON.parse(localStorage.getItem(MEMO_KEY) || '{}'); } catch (e) { return {}; } }
-  function saveMemo(m) {
-    var keys = Object.keys(m);
-    if (keys.length > 1500) {
-      keys.sort(function (a, b) { return (m[a].at || 0) - (m[b].at || 0); });
-      keys.slice(0, keys.length - 1500).forEach(function (k) { delete m[k]; });
-    }
-    try { localStorage.setItem(MEMO_KEY, JSON.stringify(m)); } catch (e) {}
-  }
-
-  function lerp(a, b, u) {
-    if (typeof a === 'number') return a + (b - a) * u;
-    return a.map(function (x, i) { return x + (b[i] - x) * u; });
-  }
-  function near(a, b, tpf) { return Math.abs(a - b) <= Math.max(2, tpf * 0.02); }
-
-  /**
-   * Clés d'origine d'une propriété. Après un premier « Appliquer », Premiere ne contient plus que des clés
-   * cuites : Sori se souvient des clés d'origine (et du décalage appliqué) pour pouvoir changer de courbe.
-   */
-  function sourceAnchors(clip, prop, memo, tpf) {
-    var native = clip.props[prop], tr = TR_PROPS[prop] && clip.transform ? clip.transform[prop] : null;
-    var m = prefs.memo ? memo[clip.id + '|' + prop] : null;
-    if (m) {
-      var cur = m.comp === 'transform' ? tr : native;
-      var ks = cur && cur.keys;
-      if (ks && ks.length >= 2 && near(ks[0].t, m.first, tpf) && near(ks[ks.length - 1].t, m.last, tpf)) {
-        var anchors = m.anchors.map(function (a) {
-          // valeurs relues dans Premiere : une clé d'origine retouchée à la main est prise en compte
-          for (var i = 0; i < ks.length; i++) if (near(ks[i].t, a.t + m.offset, tpf)) return { t: a.t, v: ks[i].v };
-          return { t: a.t, v: a.v };
-        });
-        return { anchors: anchors, memo: m, comp: m.comp };
-      }
-    }
-    var copy = function (keys) { return keys.map(function (k) { return { t: k.t, v: k.v }; }); };
-    if (native && native.keys.length >= 2) return { anchors: copy(native.keys), memo: null, comp: 'native' };
-    // clés déjà sur l'effet Transformation (transfert automatique, ou posées à la main)
-    if (tr && tr.keys.length >= 2) return { anchors: copy(tr.keys), memo: null, comp: 'transform' };
-    return null;
-  }
-
-  var TR_PROPS = { position: true, scale: true, rotation: true };
-
-  /** Valeurs neutres de la Trajectoire (clip centré, 100 %, sans rotation) */
-  var MOTION_DEFAULT = { position: [0.5, 0.5], scale: 100, rotation: 0 };
-
-  /**
-   * Trajectoire -> effet Transformation : les clés de Position / Échelle / Rotation sont recopiées dans
-   * Transformation avec leurs valeurs absolues, les valeurs fixes aussi, puis la Trajectoire est remise à zéro
-   * (centrée, 100 %, 0°). Position : même point à l'écran, exprimé dans l'image source (clip 4K, etc.).
-   * Modifie clip en mémoire (comme s'il était relu après le transfert). Renvoie { statics, trKeys, props, blocked }.
-   */
-  function transferClip(clip, seq, memo, tpf) {
-    var out = { statics: [], trKeys: {}, props: [], blocked: [] };
-    var trHas = function (p) { return clip.transform && clip.transform[p] && clip.transform[p].keys.length >= 1; };
-    var moving = Object.keys(TR_PROPS).filter(function (p) {
-      var n = clip.props[p] && clip.props[p].keys.length >= 2;
-      if (n && trHas(p)) { out.blocked.push(p); return false; }
-      return n;
-    });
-    if (!moving.length) return out;
-    var frame = clip.frame || [seq.width, seq.height];
-    var conv = function (p, v) {
-      if (p !== 'position') return v;
-      // Trajectoire neutre : le centre de l'image source se place au centre de la séquence (échelle 100 %)
-      return [0.5 + (v[0] - 0.5) * seq.width / frame[0], 0.5 + (v[1] - 0.5) * seq.height / frame[1]];
-    };
-    Object.keys(TR_PROPS).forEach(function (p) {
-      var pr = clip.props[p];
-      if (!pr || out.blocked.indexOf(p) >= 0) return;
-      if (moving.indexOf(p) >= 0) {
-        var keys = pr.keys, tkeys = keys.map(function (k) { return { t: k.t, v: conv(p, k.v) }; });
-        out.trKeys[p] = { target: 'transform', prop: p, keys: tkeys.map(function (k) { return [k.t, k.v]; }) };
-        out.props.push(p);
-        // clés d'origine mémorisées : converties elles aussi, pour pouvoir changer de courbe ensuite
-        var id = clip.id + '|' + p, m = memo[id];
-        if (m && m.comp === 'native' && near(keys[0].t, m.first, tpf) && near(keys[keys.length - 1].t, m.last, tpf)) {
-          m.comp = 'transform';
-          m.anchors = m.anchors.map(function (a) { return { t: a.t, v: conv(p, a.v) }; });
-        } else delete memo[id];
-        clip.transform = clip.transform || {};
-        clip.transform[p] = { keys: tkeys, value: null };
-      } else if (!trHas(p) && pr.keys.length < 2 && pr.value != null) {
-        // propriété non animée : sa valeur passe aussi sur Transformation (ex. clip 4K réduit à 50 %)
-        var v = pr.keys.length ? pr.keys[0].v : pr.value;
-        out.statics.push({ target: 'transform', prop: p, staticValue: conv(p, v) });
-      } else return;
-      out.statics.push({ target: 'motion', prop: p, staticValue: MOTION_DEFAULT[p] });
-      clip.props[p] = { keys: [], value: MOTION_DEFAULT[p] };
-    });
-    return out;
-  }
-
-  function valueAt(anchors, t) {
-    var n = anchors.length;
-    if (t <= anchors[0].t) return anchors[0].v;
-    if (t >= anchors[n - 1].t) return anchors[n - 1].v;
-    for (var k = 0; k < n - 1; k++) {
-      var a = anchors[k], b = anchors[k + 1];
-      if (t <= b.t) return lerp(a.v, b.v, C.evaluate(curve, (t - a.t) / (b.t - a.t)));
-    }
-    return anchors[n - 1].v;
-  }
-
   /** Écart toléré par densité (part de l'amplitude) ; chaque image = aucune simplification */
   var DENSITY_TOL = { light: 0.012, adaptive: 0.003, frame: 0 };
 
-  /** Clés cuites (temps en ticks, valeur) entre les clés d'origine, avec boucle éventuelle jusqu'à loopEnd */
-  function bake(anchors, tpf, density, loop) {
-    var times = [], values = [], forced = {}, k, j;
-    for (k = 0; k < anchors.length - 1; k++) {
-      var a = anchors[k], b = anchors[k + 1], n = Math.max(1, Math.round((b.t - a.t) / tpf));
-      for (j = 0; j < n; j++) {
-        if (!j) forced[times.length] = true;
-        times.push(a.t + (b.t - a.t) * j / n);
-        values.push(lerp(a.v, b.v, C.evaluate(curve, j / n)));
-      }
+  /** Clés à poser entre a et b (temps en ticks, valeur), sans a ni b */
+  function bakePair(a, b, tpf, density, clamp) {
+    var n = Math.max(1, Math.round((b.t - a.t) / tpf)), times = [], values = [], forced = {}, j;
+    for (j = 0; j <= n; j++) {
+      var v = j === n ? b.v : lerp(a.v, b.v, C.evaluate(curve, j / n));
+      // rebond / dépassement : l'opacité reste entre 0 et 100
+      if (clamp && typeof v === 'number') v = Math.max(0, Math.min(100, v));
+      times.push(a.t + (b.t - a.t) * j / n);
+      values.push(v);
     }
-    var tA = anchors[0].t, tN = anchors[anchors.length - 1].t;
-    forced[times.length] = true;
-    times.push(tN); values.push(anchors[anchors.length - 1].v);
-    if (loop && loop.end > tN + tpf / 2 && tN - tA >= tpf) {
-      var D = tN - tA, prevCycle = 0, count = Math.floor((loop.end - tN) / tpf);
-      for (var f = 1; f <= count; f++) {
-        var t = tN + f * tpf, r = t - tA, cyc = Math.floor(r / D + 1e-9), rr = r - cyc * D;
-        if (loop.mode === 'pingpong' && cyc % 2 === 1) rr = D - rr;
-        if (cyc !== prevCycle) { forced[times.length - 1] = true; forced[times.length] = true; prevCycle = cyc; }
-        times.push(t); values.push(valueAt(anchors, tA + rr));
-      }
-    }
+    forced[0] = true; forced[n] = true;
     var keep, tol = DENSITY_TOL[density];
     if (tol) {
-      var range = 0;
-      for (k = 0; k < anchors.length - 1; k++) {
-        var va = anchors[k].v, vb = anchors[k + 1].v;
-        range = Math.max(range, typeof va === 'number' ? Math.abs(vb - va) : Math.max(Math.abs(vb[0] - va[0]), Math.abs(vb[1] - va[1])));
-      }
+      var range = typeof a.v === 'number' ? Math.abs(b.v - a.v) : Math.max(Math.abs(b.v[0] - a.v[0]), Math.abs(b.v[1] - a.v[1]));
       // seulement les clés nécessaires pour rester à moins de tol × l'amplitude de la courbe
       keep = C.simplify(times, values, Math.max(range * tol, 1e-6), forced);
-    } else {
-      keep = times.map(function (_, i) { return i; });
-    }
-    return keep.map(function (i) { return [Math.round(times[i]), values[i]]; });
+    } else keep = times.map(function (_, i) { return i; });
+    return keep.filter(function (i) { return i > 0 && i < n; }).map(function (i) { return [Math.round(times[i]), values[i]]; });
+  }
+
+  /**
+   * Flou de mouvement imité avec l'effet Flou directionnel. Pour chaque paire de clés de Position (segs :
+   * [{ a, b, cv }], cv = courbe appliquée entre les clés a et b, ou null = linéaire) : valeur du flou à 0 sur la clé
+   * de départ, au maximum à l'image la plus rapide, à 0 sur la clé d'arrivée ; direction = celle du déplacement.
+   * Le maximum est la valeur choisie (prefs.dblur.peak) pour la paire la plus rapide de l'animation ; les paires plus
+   * lentes reçoivent une valeur proportionnelle à leur vitesse. Aucune unité à connaître : selon la version de
+   * Premiere, l'effet compte en pixels (Longueur du flou) ou sur une échelle de 0 à 100 (Quantité).
+   * size : taille en pixels d'une unité de position. Renvoie { dir, len } (clés [ticks, valeur]) ou null si rien ne bouge.
+   */
+  function blurKeys(segs, r, size) {
+    var tpf = r.seq.ticksPerFrame, rotation = r.motion ? r.motion.rotation : 0, fastest = 0;
+    var found = segs.map(function (sg) {
+      var n = Math.round((sg.b.t - sg.a.t) / tpf), out = { sg: sg, best: 0, f: -1, dx: 0, dy: 0 }, low = Infinity;
+      if (n < 2) return out;
+      var at = function (f) {
+        var u = C.clamp(f / n, 0, 1), e = sg.cv ? C.evaluate(sg.cv, u) : u;
+        return [(sg.a.v[0] + (sg.b.v[0] - sg.a.v[0]) * e) * size[0], (sg.a.v[1] + (sg.b.v[1] - sg.a.v[1]) * e) * size[1]];
+      };
+      // image la plus rapide de la paire (vitesse mesurée sur ± une demi-image)
+      for (var f = 1; f < n; f++) {
+        var p0 = at(f - 0.5), p1 = at(f + 0.5), dx = p1[0] - p0[0], dy = p1[1] - p0[1], speed = Math.hypot(dx, dy);
+        low = Math.min(low, speed);
+        if (speed > out.best * 1.001) { out.best = speed; out.f = f; out.dx = dx; out.dy = dy; }
+      }
+      if (out.f >= 0 && low > out.best * 0.97) out.f = Math.round(n / 2); // vitesse constante : maximum au milieu
+      fastest = Math.max(fastest, out.best);
+      return out;
+    });
+    if (fastest < 0.05) return null; // moins d'un vingtième de pixel par image : rien ne bouge
+    var len = [], dir = [], prev = null;
+    var put = function (list, t, v) {
+      t = Math.round(t);
+      if (list.length && list[list.length - 1][0] === t) { if (list === dir) list[list.length - 1][1] = v; return; }
+      list.push([t, v]);
+    };
+    found.forEach(function (o) {
+      var peak = Math.round(prefs.dblur.peak * o.best / fastest * 100) / 100, sg = o.sg;
+      if (o.f < 0 || peak < 0.01) return;
+      // 0° = vertical, sens horaire ; le flou est symétrique : angle ramené au plus près du précédent (à 180° près).
+      // L'effet agit avant la Rotation de la Trajectoire : l'angle en tient compte.
+      var d = Math.atan2(o.dx, -o.dy) * 180 / Math.PI - rotation;
+      if (prev != null) d -= Math.round((d - prev) / 180) * 180;
+      prev = d = Math.round(d * 10) / 10;
+      put(len, sg.a.t, 0); put(len, sg.a.t + o.f * tpf, peak); put(len, sg.b.t, 0);
+      // direction fixe pendant toute la paire (elle ne tourne pas vers celle de la paire suivante)
+      put(dir, sg.a.t, d); put(dir, sg.b.t - tpf, d);
+    });
+    return len.length ? { len: len, dir: dir } : null;
   }
 
   // ---------- Annuler une application (sans le Ctrl+Z de Premiere, qui peut le faire planter) ----------
@@ -947,41 +983,22 @@
     if (!b) return;
     var last = state.applyUndo[state.applyUndo.length - 1];
     b.disabled = !last || state.applying;
-    b.title = last ? 'Annuler « ' + last.name + ' » : remet les clips comme avant l\'application (Ctrl+Z dans Sori)' : 'Rien à annuler';
-  }
-  /** Opérations qui remettent un clip dans l'état lu avant l'application */
-  function restoreOps(c) {
-    var ops = [];
-    var put = function (target, prop, info) {
-      if (!info) return;
-      if (info.keys && info.keys.length) ops.push({ target: target, prop: prop, keys: info.keys.map(function (k) { return [k.t, k.v]; }) });
-      else if (info.value != null) ops.push({ target: target, prop: prop, staticValue: info.value });
-    };
-    ['position', 'scale', 'scaleWidth', 'rotation'].forEach(function (p) { put('motion', p, c.props[p]); });
-    put('opacity', 'opacity', c.props.opacity);
-    if (c.transform) ['position', 'scale', 'rotation'].forEach(function (p) { put('transform', p, c.transform[p]); });
-    else {
-      // effet ajouté par Sori : remis au neutre (aucun changement à l'image, sans flou) ; il peut être supprimé à la main
-      ['position', 'scale', 'rotation'].forEach(function (p) { ops.push({ target: 'transform', prop: p, reset: true }); });
-      ops.push({ target: 'transform', prop: 'shutter', staticValue: 0, optional: true });
-    }
-    return ops;
+    b.title = last ? 'Annuler « ' + last.name + ' » : retire les images clés posées par Sori (Ctrl+Z dans Sori)' : 'Rien à annuler';
   }
   function undoApply() {
     var last = state.applyUndo[state.applyUndo.length - 1];
-    if (!last || state.applying) return;
-    if (!inCEP) return;
+    if (!last || state.applying || !inCEP) return;
     state.applying = true;
     renderUndoBtn();
     toast('Annulation de « ' + last.name + ' »…', 'busy', true);
-    var plan = { noSetup: true, clips: last.clips.map(function (c) { return { id: c.id, ops: restoreOps(c) }; }) };
-    jsx('applyPlan', [JSON.stringify(plan)]).then(function (res) {
+    jsx('bake', [JSON.stringify(last.plan)]).then(function (res) {
       if (!res.success) throw new Error(res.error);
       state.applyUndo.pop();
-      try { localStorage.setItem(MEMO_KEY, last.memo); } catch (e) {}
+      try { localStorage.setItem(REC_KEY, last.recs); } catch (e) {}
+      recsCache = null;
       if (!state.applyUndo.length) state.lastAction = 'edit';
       var errs = res.errors && res.errors.length ? ' Erreurs : ' + res.errors.slice(0, 2).join(' ; ') : '';
-      toast('« ' + last.name + ' » annulée : ' + res.clips + ' clip' + (res.clips > 1 ? 's' : '') + ' remis comme avant.' + errs, errs ? 'err' : 'ok');
+      toast('« ' + last.name + ' » annulée : les images clés sont comme avant.' + errs, errs ? 'err' : 'ok');
     }).catch(function (e) { toast(e.message || String(e), 'err'); }).then(function () {
       state.applying = false;
       renderUndoBtn();
@@ -996,62 +1013,70 @@
     var btn = $('#btnApply');
     if (btn) btn.disabled = true;
     toast('Lecture des images clés…', 'busy', true);
-    jsx('readSelection').then(function (r) {
+    jsx('scan', [true]).then(function (r) {
       if (!r.success) throw new Error(r.error);
-      if (!r.clips.length) throw new Error('Sélectionnez un ou plusieurs clips vidéo animés dans la timeline.');
-      var seq = r.seq, tpf = seq.ticksPerFrame, memo = loadMemo(), now = Date.now();
-      // état d'avant, pour « Annuler » (copie : transferClip modifie les clips en mémoire)
-      var before = JSON.parse(JSON.stringify(r.clips)), memoBefore = JSON.stringify(memo);
-      var plan = { shutter: prefs.autoTr.angle, clips: [] }, skipped = [], props = 0, keysTotal = 0;
-      // toutes les propriétés animées (au moins 2 clés) des clips sélectionnés
-      var chosen = PROPS.map(function (p) { return p.id; });
-      r.clips.forEach(function (clip) {
-        var offset = 0;
-        var ops = [], done = {};
-        var loop = prefs.loop.on ? { mode: prefs.loop.mode, end: clip.outPoint - tpf } : null;
-        var list = chosen.slice();
-        if (list.indexOf('scale') >= 0 && !clip.uniform && clip.props.scaleWidth && clip.props.scaleWidth.keys.length >= 2) list.push('scaleWidth');
-        // Trajectoire -> Transformation d'abord (flou de mouvement), puis la courbe sur les clés recopiées
-        var moved = prefs.autoTr.on ? transferClip(clip, seq, memo, tpf) : null;
-        if (moved) ops = ops.concat(moved.statics);
-        list.forEach(function (prop) {
-          var src = sourceAnchors(clip, prop, memo, tpf);
-          if (!src) {
-            // sans clé : propriété simplement non animée ; une seule clé : sûrement un oubli, on le signale
-            if (clip.props[prop] && clip.props[prop].keys.length === 1) skipped.push(clip.name + ' · ' + PROP_LABEL[prop]);
-            return;
-          }
-          var anchors = src.anchors;
-          var shifted = anchors.map(function (a) { return { t: a.t + offset, v: a.v }; });
-          var keys = bake(shifted, tpf, prefs.density, loop);
-          ops.push({ target: src.comp === 'transform' ? 'transform' : prop === 'opacity' ? 'opacity' : 'motion', prop: prop, keys: keys });
-          done[prop] = true;
-          props++; keysTotal += keys.length;
-          // toutes les clés d'origine (même en mode 1re → dernière), aux temps d'avant décalage
-          memo[clip.id + '|' + prop] = {
-            anchors: src.anchors, offset: offset, comp: src.comp,
-            first: keys[0][0], last: keys[keys.length - 1][0], at: now,
-            // courbe appliquée : rechargée dans l'éditeur quand le clip est resélectionné
-            curve: C.serialize(curve), curveName: prefs.curveName, curveId: prefs.curveId
-          };
-        });
-        // propriétés transférées sans courbe appliquée (ex. clés « 1re → dernière » manquantes) : recopiées telles quelles
-        if (moved) moved.props.forEach(function (p) { if (!done[p]) ops.push(moved.trKeys[p]); });
-        if (ops.length) plan.clips.push({ id: clip.id, ops: ops });
+      if (!r.clip) throw new Error('Sélectionnez un clip vidéo animé dans la timeline.');
+      state.sel = takeScan(r);
+      state.selKey = '';
+      var targets = checkedProps(), tpf = r.seq.ticksPerFrame, id = r.clip.id;
+      if (!r.props.length) throw new Error('Aucune propriété animée sur ce clip : posez au moins 2 images clés.');
+      if (!targets.length) throw new Error('Cochez au moins une propriété.');
+      // copie de travail : enregistrée seulement si Premiere a bien écrit les clés
+      var recsBefore = JSON.stringify(loadRecs()), recs = JSON.parse(recsBefore), now = Date.now(), total = 0;
+      var plan = { id: id, ops: [] }, back = { id: id, ops: [] };
+      targets.forEach(function (p) {
+        var a = p.pair.a, b = p.pair.b;
+        var keys = bakePair(a, b, tpf, prefs.density, /opacity/i.test(p.match));
+        var ref = { ci: p.ci, pi: p.pi, match: p.match, name: p.name, t0: a.t, t1: b.t };
+        plan.ops.push(Object.assign({ keys: keys }, ref));
+        // annulation : les clés qui étaient entre les deux avant (une ancienne courbe, ou rien)
+        back.ops.push(Object.assign({ keys: p.inner.map(function (k) { return [k.t, k.v]; }) }, ref));
+        total += keys.length;
+        var rid = recId(id, p), rec = recs[rid] || { bakes: [] };
+        rec.bakes = rec.bakes.filter(function (x) { return !(near(x.t0, a.t, tpf) && near(x.t1, b.t, tpf)); });
+        rec.bakes.push({ t0: a.t, t1: b.t, times: keys.map(function (k) { return k[0]; }), curve: C.serialize(curve), curveName: prefs.curveName, curveId: prefs.curveId });
+        rec.at = now;
+        recs[rid] = rec;
       });
-      if (!plan.clips.length) {
-        throw new Error('Aucune propriété animée sur les clips sélectionnés : posez au moins 2 images clés (Position, Échelle, Rotation ou Opacité).');
+      // flou directionnel : calculé sur la Position de la Trajectoire telle qu'elle sera après cette application
+      var blurred = false, blurWhy = '';
+      if (prefs.dblur.on) {
+        // Position de la Trajectoire, sinon une autre position cochée (effet Transformation, etc.)
+        var isXY = function (p) { return typeof p.keys[0].v !== 'number'; };
+        var pos = targets.filter(function (p) { return /ADBE Motion$/.test(p.match) && p.pi === 0 && isXY(p); })[0] ||
+          targets.filter(function (p) { return isXY(p) && /position|posici|posizione/i.test(p.name); })[0];
+        if (pos) {
+          var segs = [];
+          for (var si = 0; si < pos.orig.length - 1; si++) {
+            var ka = pos.orig[si], kb = pos.orig[si + 1], cv = null;
+            if (ka === pos.pair.a) cv = curve;
+            else pos.alive.forEach(function (x) {
+              if (near(x.t0, ka.t, tpf) && near(x.t1, kb.t, tpf)) { try { if (C.validCurve(x.curve)) cv = C.fromPoints(x.curve.points); } catch (e) {} }
+            });
+            segs.push({ a: ka, b: kb, cv: cv });
+          }
+          // positions en pixels (effet Transformation selon les versions) ou en fraction de l'image
+          var px = pos.keys.some(function (k) { return Math.abs(k.v[0]) > 4 || Math.abs(k.v[1]) > 4; });
+          var bk = blurKeys(segs, r, px ? [1, 1] : [r.seq.width || 1920, r.seq.height || 1080]);
+          if (bk) {
+            plan.blur = { add: true, dir: bk.dir, len: bk.len };
+            var old = function (role) {
+              var q = r.blurProps.filter(function (x) { return x.role === role; })[0];
+              return q ? q.keys.map(function (k) { return [k.t, k.v]; }) : [];
+            };
+            back.blur = { add: false, dir: old('dir'), len: old('len') };
+            blurred = true;
+          } else blurWhy = 'flou : la position ne bouge pas assez';
+        } else blurWhy = 'flou : cochez la Position (Trajectoire) dans la liste';
       }
-      toast('Injection de ' + keysTotal + ' images clés…', 'busy', true);
-      return jsx('applyPlan', [JSON.stringify(plan)]).then(function (res) {
+      toast('Pose de ' + total + ' images clés…', 'busy', true);
+      return jsx('bake', [JSON.stringify(plan)]).then(function (res) {
         if (!res.success) throw new Error(res.error);
-        saveMemo(memo);
-        if (res.trDiag) { try { localStorage.setItem('sori.trdiag', JSON.stringify(res.trDiag)); } catch (e) {} }
-        var ids = plan.clips.map(function (c) { return c.id; });
-        pushApplyUndo({ name: prefs.curveName || 'Courbe', memo: memoBefore, clips: before.filter(function (c) { return ids.indexOf(c.id) >= 0; }) });
-        var msg = '« ' + (prefs.curveName || 'Courbe') + ' » appliquée : ' + res.clips + ' clip' + (res.clips > 1 ? 's' : '') + ', ' + props + ' propriété' + (props > 1 ? 's' : '') + ', ' + res.keys + ' clés.';
-        if (res.errors && res.errors.length) toast(msg + ' Erreurs : ' + res.errors.slice(0, 3).join(' ; '), 'err');
-        else if (skipped.length) toast(msg + ' Ignorés (une seule image clé) : ' + skipped.slice(0, 3).join(', ') + (skipped.length > 3 ? '…' : ''));
+        saveRecs(recs);
+        pushApplyUndo({ name: prefs.curveName || 'Courbe', plan: back, recs: recsBefore });
+        var b = res.blur, blurMsg = blurred ? (b ? 'flou posé sur « ' + b.effect + ' » (' + b.len + ' clés)' : 'flou : effet non trouvé') : blurWhy;
+        var msg = '« ' + (prefs.curveName || 'Courbe') + ' » appliquée : ' + targets.length + ' propriété' + (targets.length > 1 ? 's' : '') + ', ' + res.keys + ' clés posées' + (blurMsg ? ' ; ' + blurMsg : '') + '.';
+        if (res.errors && res.errors.length) toast(msg + ' Erreurs : ' + res.errors.join(' ; '), 'err');
         else toast(msg);
       });
     }).catch(function (e) {
@@ -1367,41 +1392,20 @@
     return '<label class="toggle ' + (on ? 'on' : '') + '" data-set="' + id + '"><span class="sw"></span>' + label + '</label>' + (hint ? '<div class="hint">' + hint + '</div>' : '');
   }
 
-  /** Paramètres de l'effet Transformation vus par le script lors du dernier « Appliquer » */
-  function diagBlock() {
-    var d = null;
-    try { d = JSON.parse(localStorage.getItem('sori.trdiag') || 'null'); } catch (e) {}
-    if (!d) return '';
-    return '<div class="sgroup"><h3>' + icon('activity') + 'Diagnostic Transformation</h3><div class="sbox">' +
-      '<div class="hint">' + esc(d.comp) + ' — échelle écrite sur n° <b>' + d.scale + '</b>, largeur sur n° <b>' + d.width + '</b></div>' +
-      '<div class="hint">' + d.names.map(function (n, i) {
-        var mark = i === d.scale ? ' ← échelle' : i === d.width ? ' ← largeur' : i === d.position ? ' ← position' : i === d.rotation ? ' ← rotation' : i === d.shutter ? ' ← obturation' : '';
-        return i + ' : ' + (n ? esc(n) : '<i>(sans nom)</i>') + (mark ? ' <b>' + mark + '</b>' : '');
-      }).join('<br/>') + '</div></div></div>';
-  }
-
   function renderSettings() {
     var s = $('#settings'), a = appearance();
     var tabs = [['inject', 'Injection', 'zap'], ['appearance', 'Apparence', 'sliders']];
     var body = '';
     if (setTab === 'inject') {
-      var memoCount = Object.keys(loadMemo()).length;
       body =
         '<div class="sgroup"><h3>' + icon('zap') + 'Images clés</h3><div class="sbox">' +
-        '<div class="hint">Premiere ne laisse pas un script régler l\'influence et la vitesse des poignées de Bézier (seulement le type de clé) : ' +
-        'Sori ajoute donc quelques clés intermédiaires qui suivent la courbe. <b>Légère</b> = le minimum (écart ≤ 1,2 %), ' +
-        '<b>Précise</b> = écart ≤ 0,3 %, <b>Chaque image</b> = fidélité totale. Les valeurs des clés d\'origine ne sont jamais modifiées.</div>' +
+        '<div class="hint">Premiere ne laisse pas un script régler l\'influence et la vitesse des poignées de Bézier : ' +
+        'Sori pose donc des clés intermédiaires qui suivent la courbe, entre les deux clés d\'origine (jamais modifiées). <b>Légère</b> = le minimum (écart ≤ 1,2 %), ' +
+        '<b>Précise</b> = écart ≤ 0,3 %, <b>Chaque image</b> = fidélité totale.</div>' +
         '<div class="opt"><span class="opt-l">Densité des clés</span>' + seg('density', prefs.density, Object.keys(DENSITY_LABELS).map(function (k) { return [k, DENSITY_LABELS[k]]; })) + '</div>' +
-        setToggle('memo', prefs.memo, 'Se souvenir des clés d\'origine', 'Permet de réappliquer une autre courbe sur un clip déjà traité : Sori retrouve les clés d\'origine au lieu de traiter chaque clé cuite comme une paire. ' + memoCount + ' propriété' + (memoCount > 1 ? 's' : '') + ' mémorisée' + (memoCount > 1 ? 's' : '') + '.') +
-        '<div class="srow"><button class="sbtn sm danger" id="clearMemo"' + (memoCount ? '' : ' disabled') + '>' + icon('trash') + 'Oublier les clés mémorisées</button></div>' +
         '</div></div>' +
-        '<div class="sgroup"><h3>' + icon('wind') + 'Flou de mouvement</h3><div class="sbox"><div class="hint">Option activée : posez vos images clés de Position, Échelle ou Rotation ' +
-        'sur la <b>Trajectoire</b> comme d\'habitude. Au clic sur <b>Appliquer</b>, Sori ajoute l\'effet <b>Transformation</b>, y recopie les clés avec leurs valeurs, ' +
-        'règle l\'angle d\'obturation (<b>Faible</b> 90°, <b>Moyen</b> 180°, <b>Élevé</b> 360°), remet la Trajectoire à zéro et applique la courbe. ' +
-        'Les fois suivantes, « Appliquer » travaille directement sur les clés de Transformation.</div></div></div>' +
-        diagBlock() +
         '<div class="sgroup"><h3>' + icon('spline') + 'Éditeur</h3><div class="sbox">' +
-        setToggle('autoSel', prefs.autoSel, 'Suivre la sélection de la timeline', 'La grille de l\'éditeur passe en images (durée entre la première et la dernière clé du premier clip sélectionné).') +
+        setToggle('autoSel', prefs.autoSel, 'Suivre la sélection de la timeline', 'Sori relit le clip sélectionné et la tête de lecture tant que la souris est sur le panneau.') +
         '</div></div>';
     } else {
       var isCur = function (p) { return p.background === a.theme.background && p.accent === a.theme.accent && p.primary === a.theme.primary; };
@@ -1463,7 +1467,6 @@
       $$('[data-seg="density"] button', s).forEach(function (b) {
         b.onclick = function () { prefs.density = b.getAttribute('data-v'); savePrefs(); renderSettings(); };
       });
-      $('#clearMemo').onclick = function () { saveMemo({}); try { localStorage.removeItem(MEMO_KEY); } catch (e) {} renderSettings(); toast('Clés mémorisées oubliées.'); };
     } else {
       bindAppearance(s, a);
     }
@@ -1567,7 +1570,7 @@
   function shutdown() {
     if (closing) return;
     closing = true;
-    clearInterval(projectTimer); clearInterval(state.selTimer);
+    clearInterval(projectTimer); clearTimeout(state.selTimer);
   }
 
   function init() {

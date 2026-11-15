@@ -1,9 +1,9 @@
 /**
  * Sori - ExtendScript Premiere Pro (2022 -> 2026+)
- * Lecture des images cles des clips selectionnes et injection des courbes calculees par le panneau.
+ * Lit les proprietes animees du clip selectionne et pose les images cles calculees par le panneau.
  *
- * Premiere n'expose pas les poignees de Bezier des images cles en script : la courbe est donc
- * "cuite" en images cles lineaires (une par image, une sur deux, ou adaptatives) entre les cles d'origine.
+ * Premiere n'expose pas les poignees de Bezier des images cles en script : la courbe est donc posee en
+ * images cles lineaires entre deux cles d'origine, qui ne sont jamais modifiees.
  *
  * IMPORTANT : ce fichier doit rester 100 % ASCII (ExtendScript le lit sans BOM) :
  * les accents des messages sont ecrits en \uXXXX.
@@ -70,31 +70,7 @@ $.Sori = (function () {
         return null;
     }
     function motionComp(item) { return findComp(item, 'AE.ADBE Motion', /^(motion|trajectoire|mouvement)$/i); }
-    function opacityComp(item) { return findComp(item, 'AE.ADBE Opacity', /^(opacity|opacit\u00e9)$/i); }
 
-    /** Effet Transformation : nom interne, nom affiche (toutes langues courantes) ou parametre "angle d'obturation" */
-    function isTransformComp(c) {
-        if (!c) return false;
-        var mn = String(c.matchName || ''), dn = String(c.displayName || '');
-        if (/geometry/i.test(mn)) return true;
-        if (/^(transform|transformer|transformation|transformieren|trasforma|transformar|transformacion|trasformazione)$/.test(norm(dn))) return true;
-        if (mn === 'AE.ADBE Motion' || mn === 'AE.ADBE Opacity') return false;
-        try {
-            var props = c.properties;
-            if (props.numItems < 9) return false;
-            for (var i = 0; i < props.numItems; i++) {
-                var n = String(props[i].displayName);
-                if (/shutter|obturat|verschluss|otturatore|obturaci/i.test(n) && !/composition|komposition|composizione|composici/i.test(n)) return true;
-            }
-        } catch (e) {}
-        return false;
-    }
-    function transformComp(item) {
-        var comps = item.components, found = null;
-        for (var i = 0; i < comps.numItems; i++) if (isTransformComp(comps[i])) found = comps[i];
-        return found;
-    }
-    /** Liste des effets du clip, pour un message d'erreur exploitable */
     function compList(item) {
         var out = [];
         try { for (var i = 0; i < item.components.numItems; i++) { var c = item.components[i]; out.push(String(c.displayName) + ' [' + String(c.matchName) + ']'); } } catch (e) {}
@@ -109,21 +85,12 @@ $.Sori = (function () {
         return entry.item;
     }
 
-    function paramByName(comp, re, fallbackIndex) {
-        if (!comp) return null;
-        var props = comp.properties, i;
-        for (i = 0; i < props.numItems; i++) if (props[i] && re.test(String(props[i].displayName))) return props[i];
-        if (fallbackIndex !== undefined && fallbackIndex < props.numItems) return props[fallbackIndex];
-        return null;
-    }
-
     // Trajectoire : 0 Position, 1 Echelle, 2 Largeur d'echelle, 3 Echelle uniforme, 4 Rotation, 5 Point d'ancrage
     var MOTION_IDX = { position: 0, scale: 1, scaleWidth: 2, uniform: 3, rotation: 4 };
     function motionParam(item, key) {
         var c = motionComp(item);
         return c && MOTION_IDX[key] < c.properties.numItems ? c.properties[MOTION_IDX[key]] : null;
     }
-    function opacityParam(item) { var c = opacityComp(item); return c ? c.properties[0] : null; }
 
     /**
      * Nom de parametre simplifie : minuscules, sans accents (y compris les accents "combinants" que Premiere
@@ -137,87 +104,21 @@ $.Sori = (function () {
         return s.replace(/[^a-z0-9]+/g, ' ').replace(/^\s+|\s+$/g, '');
     }
 
-    /** Parametres de Transformation, reconnus sur le nom simplifie (toutes langues courantes) */
-    var TR_MATCH = {
-        position: function (n) { return n === 'position' || n === 'posicion' || n === 'posizione'; },
-        uniform: function (n) { return /uniform/.test(n); },
-        scale: function (n) { return /^(scale|scale height|echelle|hauteur d echelle|echelle hauteur|echelle en hauteur|skalierung|hohe skalieren|skalierungshohe|scala|altezza scala|escala|altura de escala)$/.test(n); },
-        scaleWidth: function (n) { return /^(scale width|largeur d echelle|echelle largeur|echelle en largeur|breite skalieren|skalierungsbreite|larghezza scala|anchura de escala|ancho de escala)$/.test(n); },
-        rotation: function (n) { return /^(rotation|drehung|rotazione|rotacion)$/.test(n); },
-        useComp: function (n) { return /composition|komposition|composizione|composicion|utiliser|verwenden|usa |usar /.test(n) && /obtur|shutter|verschluss|otturat/.test(n); },
-        shutter: function (n) { return /obtur|shutter|verschluss|otturat/.test(n) && !TR_MATCH.useComp(n); }
-    };
-    // ordre usuel de l'effet Transformation, en secours si un nom est introuvable
-    var TR_INDEX = { position: 1, uniform: 2, scale: 3, scaleWidth: 4, rotation: 7, useComp: 9, shutter: 10 };
-
-    /** Numero du parametre dans l'effet (-1 si introuvable). Toujours par numero : Premiere renvoie un nouvel objet a chaque lecture. */
-    function trIndex(comp, key) {
-        if (!comp) return -1;
-        var props = comp.properties, n = props.numItems, i;
-        for (i = 0; i < n; i++) { try { if (TR_MATCH[key](norm(props[i].displayName))) return i; } catch (e) {} }
-        if (key === 'scale' || key === 'scaleWidth') {
-            // Echelle juste apres la case "Echelle uniforme", largeur juste apres
-            var u = trIndex(comp, 'uniform');
-            if (u >= 0 && u + (key === 'scale' ? 1 : 2) < n) return u + (key === 'scale' ? 1 : 2);
-        }
-        return TR_INDEX[key] < n ? TR_INDEX[key] : -1;
-    }
-    function trParam(comp, key) {
-        var i = trIndex(comp, key);
-        return i >= 0 ? comp.properties[i] : null;
-    }
-
-    function paramFor(item, target, key) {
-        if (target === 'opacity') return opacityParam(item);
-        if (target === 'transform') return trParam(transformComp(item), key);
-        return motionParam(item, key);
-    }
-
-    function plainValue(v) {
-        if (v && typeof v === 'object' && v.length >= 2) return [Number(v[0]), Number(v[1])];
-        if (typeof v === 'boolean') return v;
-        return Number(v);
-    }
-
-    function keysOf(param) {
-        var out = [];
-        if (!param) return out;
-        try { if (!param.isTimeVarying()) return out; } catch (e) { return out; }
-        var ks = param.getKeys();
-        if (!ks) return out;
-        for (var i = 0; i < ks.length; i++) {
-            var t = typeof ks[i] === 'number' ? mkTime(ks[i] * TICKS) : ks[i];
-            out.push({ t: ticksOf(t), v: plainValue(param.getValueAtKey(t)) });
-        }
-        return out;
-    }
-    function staticValue(param) {
-        if (!param) return null;
-        try { return plainValue(param.getValue()); } catch (e) { return null; }
-    }
-    function propInfo(param) {
-        if (!param) return null;
-        return { keys: keysOf(param), value: staticValue(param) };
-    }
-
     // ---------- Selection ----------
-    /** Clips video selectionnes, avec leur piste */
+    /**
+     * Clips video selectionnes. Lus directement sur la selection (type et piste du clip), sans parcourir
+     * toute la sequence : cette lecture a lieu plusieurs fois par seconde.
+     */
     function selectedVideo(seq) {
-        var sel = seq.getSelection(), out = [], i, t, c, tracks = seq.videoTracks;
-        var byId = {};
-        for (t = 0; t < tracks.numTracks; t++) {
-            var clips = tracks[t].clips;
-            for (c = 0; c < clips.numItems; c++) {
-                try { byId[clips[c].nodeId] = t; } catch (e) {}
-            }
-        }
-        for (i = 0; i < sel.length; i++) {
+        var sel = seq.getSelection(), out = [];
+        for (var i = 0; i < sel.length; i++) {
             var it = sel[i];
             if (!it) continue;
-            var id = '';
+            try { if (it.mediaType !== undefined && String(it.mediaType) !== 'Video') continue; } catch (e) {}
+            var id = '', track = -1;
             try { id = String(it.nodeId); } catch (e2) {}
-            if (!(id in byId)) continue; // audio ou autre
-            out.push({ item: it, id: id, track: byId[id] });
+            try { track = Number(it.parentTrackIndex); } catch (e3) {}
+            if (id) out.push({ item: it, id: id, track: track });
         }
         return out;
     }
@@ -234,122 +135,7 @@ $.Sori = (function () {
         return out;
     }
 
-    /** Taille de l'image source (pour convertir la position vers l'effet Transformation) */
-    function clipFrameSize(item, seq) {
-        try {
-            var md = String(item.projectItem.getProjectMetadata());
-            var m = md.match(/VideoInfo>\s*(\d+)\s*x\s*(\d+)/);
-            if (m) return [Number(m[1]), Number(m[2])];
-        } catch (e) {}
-        return [Number(seq.frameSizeHorizontal), Number(seq.frameSizeVertical)];
-    }
-
-    function describe(entry, seq, full) {
-        var it = entry.item;
-        var o = {
-            id: entry.id, name: String(it.name), track: entry.track,
-            start: ticksOf(it.start), end: ticksOf(it.end), inPoint: ticksOf(it.inPoint), outPoint: ticksOf(it.outPoint),
-            props: {
-                position: propInfo(motionParam(it, 'position')),
-                scale: propInfo(motionParam(it, 'scale')),
-                scaleWidth: propInfo(motionParam(it, 'scaleWidth')),
-                rotation: propInfo(motionParam(it, 'rotation')),
-                opacity: propInfo(opacityParam(it))
-            }
-        };
-        try { o.uniform = !!motionParam(it, 'uniform').getValue(); } catch (e) { o.uniform = true; }
-        if (full) {
-            var tr = transformComp(it);
-            o.frame = clipFrameSize(it, seq);
-            if (tr) {
-                // position de Transformation toujours renvoyee en coordonnees normalisees de l'image source
-                var pp = trParam(tr, 'position'), pos = propInfo(pp);
-                if (pos && posIsPx(pp)) {
-                    var f = o.frame, toN = function (v) { return v && typeof v === 'object' ? [v[0] / f[0], v[1] / f[1]] : v; };
-                    for (var k = 0; k < pos.keys.length; k++) pos.keys[k].v = toN(pos.keys[k].v);
-                    pos.value = toN(pos.value);
-                }
-                o.transform = { position: pos, scale: propInfo(trParam(tr, 'scale')), rotation: propInfo(trParam(tr, 'rotation')) };
-            }
-        }
-        return o;
-    }
-
-    /** Position de Transformation en pixels (sinon normalisee 0..1) : lu sur la valeur ou les cles */
-    function posIsPx(param) {
-        var big = function (v) { return v && typeof v === 'object' && (Math.abs(v[0]) > 2 || Math.abs(v[1]) > 2); };
-        if (big(staticValue(param))) return true;
-        var ks = keysOf(param);
-        for (var i = 0; i < ks.length; i++) if (big(ks[i].v)) return true;
-        return false;
-    }
-
-    function sequenceInfo(seq) {
-        return {
-            name: String(seq.name), ticksPerFrame: Number(seq.timebase),
-            width: Number(seq.frameSizeHorizontal), height: Number(seq.frameSizeVertical),
-            playhead: ticksOf(seq.getPlayerPosition())
-        };
-    }
-
-    /** Lecture complete : cles de Position / Echelle / Rotation / Opacite (+ effet Transformation) */
-    function readSelection() {
-        try {
-            var seq = seqOrNull();
-            if (!app.project) return fail(T.noProject);
-            if (!seq) return fail(T.noSeq);
-            var list = selectedVideo(seq), clips = [];
-            for (var i = 0; i < list.length; i++) clips.push(describe(list[i], seq, true));
-            return ok({ seq: sequenceInfo(seq), clips: clips });
-        } catch (e) { return fail(errText(e)); }
-    }
-
-    /** Lecture complete d'un seul clip (bande des images cles du panneau) */
-    function readClip(id) {
-        try {
-            var seq = seqOrNull();
-            if (!seq) return fail(T.noSeq);
-            var entry = allVideo(seq)[String(id)];
-            if (!entry) return fail('Clip introuvable');
-            return ok({ seq: sequenceInfo(seq), clip: describe(entry, seq, true) });
-        } catch (e) { return fail(errText(e)); }
-    }
-
-    /** Resume leger pour la barre de selection (appele regulierement) */
-    function summary() {
-        try {
-            var seq = seqOrNull();
-            if (!seq) return ok({ seq: null, clips: [] });
-            var list = selectedVideo(seq), clips = [];
-            for (var i = 0; i < list.length && i < 50; i++) {
-                var it = list[i].item, counts = {}, spans = {}, trCounts = {}, mCounts = {};
-                var tr = transformComp(it);
-                var keys = { position: motionParam(it, 'position'), scale: motionParam(it, 'scale'), rotation: motionParam(it, 'rotation'), opacity: opacityParam(it) };
-                for (var k in keys) {
-                    if (!keys.hasOwnProperty(k)) continue;
-                    var n = 0, ks = null, param = keys[k];
-                    // propriete animee sur Transformation plutot que sur la Trajectoire
-                    if (k !== 'opacity' && tr) {
-                        var tp = trParam(tr, k), tn = 0;
-                        try { if (tp && tp.isTimeVarying()) tn = tp.getKeys().length; } catch (e3) {}
-                        trCounts[k] = tn;
-                    }
-                    try { if (param && param.isTimeVarying()) { ks = param.getKeys(); n = ks.length; } } catch (e) {}
-                    mCounts[k] = n;
-                    if (n < 2 && trCounts[k] >= 2) {
-                        try { param = trParam(tr, k); ks = param.getKeys(); n = ks.length; } catch (e4) {}
-                    }
-                    counts[k] = n;
-                    // duree entre la premiere et la derniere cle : sert d'echelle de temps a l'editeur
-                    if (n >= 2) spans[k] = ticksOf(typeof ks[n - 1] === 'number' ? mkTime(ks[n - 1] * TICKS) : ks[n - 1]) - ticksOf(typeof ks[0] === 'number' ? mkTime(ks[0] * TICKS) : ks[0]);
-                }
-                clips.push({ id: list[i].id, name: String(it.name), counts: counts, mCounts: mCounts, trCounts: trCounts, spans: spans, start: ticksOf(it.start) });
-            }
-            return ok({ seq: { name: String(seq.name), ticksPerFrame: Number(seq.timebase) }, clips: clips, total: list.length });
-        } catch (e2) { return fail(errText(e2)); }
-    }
-
-    // ---------- Effet Transformation (flou de mouvement) ----------
+    // ---------- Effet ajoute par l'acces QE ----------
     function qeItemFor(seq, entry) {
         app.enableQE();
         var qs = qe.project.getActiveSequence();
@@ -366,13 +152,35 @@ $.Sori = (function () {
         }
         return byName;
     }
-    var TR_NAMES = /^(transform|transformer|transformation|transformieren|trasforma|transformar|transformacja|transformeren)$/i;
 
-    /**
-     * Noms a essayer pour l'effet Transformation, dans la langue de Premiere : d'abord ceux de la liste
-     * d'effets de Premiere (noms reels, traduits), puis les noms usuels. seen = noms "transform..." trouves.
-     */
-    function transformNames(seen) {
+    // ---------- Flou directionnel (imitation de flou de mouvement) ----------
+    var BLUR_RE = /^(directional blur|flou directionnel|richtungsunscharfe|gerichteter weichzeichner|sfocatura direzionale|controllo sfocatura direzionale|desenfoque direccional)$/;
+    function isBlurComp(c) {
+        var mn = '', dn = '';
+        try { mn = String(c.matchName); } catch (e) {}
+        try { dn = String(c.displayName); } catch (e2) {}
+        return /motion blur|directional/i.test(mn) || BLUR_RE.test(norm(dn));
+    }
+    function blurComp(item) {
+        var cs = item.components;
+        for (var i = 0; i < cs.numItems; i++) if (isBlurComp(cs[i])) return cs[i];
+        return null;
+    }
+    /** Numeros des parametres de direction et de quantite du flou (par nom, sinon l'ordre de l'effet classique : 0 et 1) */
+    function blurIdx(comp) {
+        var out = { dir: -1, len: -1 }, ps = comp.properties;
+        for (var i = 0; i < ps.numItems; i++) {
+            var n = '';
+            try { n = norm(ps[i].displayName); } catch (e) {}
+            // Flou directionnel classique : Direction / Longueur du flou ; celui de Premiere 2025 (Impact) : Angle / Quantite
+            if (out.dir < 0 && /^(direction|richtung|direzione|direccion|angle|winkel|angolo|angulo)$/.test(n)) out.dir = i;
+            else if (out.len < 0 && /^(blur length|longueur du flou|longueur de flou|lange|unscharfelange|lunghezza sfocatura|longitud de desenfoque|amount|quantite|betrag|menge|quantita|cantidad)$/.test(n)) out.len = i;
+        }
+        if (out.dir < 0) out.dir = 0;
+        if (out.len < 0 || out.len === out.dir) out.len = out.dir === 1 ? 0 : 1;
+        return out;
+    }
+    function blurNames(seen) {
         app.enableQE();
         var out = [], add = function (n) { for (var k = 0; k < out.length; k++) if (out[k] === n) return; out.push(n); };
         try {
@@ -380,147 +188,221 @@ $.Sori = (function () {
             if (typeof list === 'string') list = list.split(/[,\n;]/);
             for (j = 0; j < list.length; j++) {
                 n = String(list[j]).replace(/^\s+|\s+$/g, '');
-                if (/transform/i.test(n)) seen.push(n);
-                if (TR_NAMES.test(n)) add(n);
+                if (/blur|flou|weichzeichner|unsch|sfocatura|desenfoque/i.test(n)) seen.push(n);
+                if (BLUR_RE.test(norm(n))) add(n);
             }
         } catch (e) {}
-        var usual = ['Transform', 'Transformer', 'Transformation', 'Transformieren', 'Trasforma', 'Transformar'];
+        var usual = ['Directional Blur', 'Flou directionnel', 'Richtungsunsch\u00e4rfe', 'Sfocatura direzionale', 'Desenfoque direccional'];
         for (var i = 0; i < usual.length; i++) add(usual[i]);
         return out;
     }
-    function setChecked(param, on) {
-        if (!param) return;
-        try { param.setValue(on, true); } catch (e) { try { param.setValue(on ? 1 : 0, true); } catch (e2) {} }
-    }
-    function ensureTransform(seq, entry, shutter) {
-        var tr = transformComp(entry.item);
-        if (!tr) {
-            var qi = qeItemFor(seq, entry);
-            if (!qi) throw new Error(T.clipGone);
-            var seen = [], names = transformNames(seen), tries = [];
-            // chaque nom est essaye, et l'ajout verifie sur le clip : un nom inconnu ne fait rien sans erreur
-            for (var i = 0; i < names.length && !tr; i++) {
-                var fx = null, before = freshItem(seq, entry).components.numItems;
-                try { fx = qe.project.getVideoEffectByName(names[i]); } catch (e1) {}
-                if (!fx) { tries.push(names[i] + ' : inconnu'); continue; }
-                try { qi.addVideoEffect(fx); } catch (e2) { tries.push(names[i] + ' : ' + errText(e2)); continue; }
-                try { $.sleep(40); } catch (e3) {}
-                entry.item = freshItem(seq, entry);
-                tr = transformComp(entry.item);
-                // effet ajoute mais non reconnu par son nom : le dernier composant apparu est le bon
-                if (!tr && entry.item.components.numItems > before) tr = entry.item.components[entry.item.components.numItems - 1];
-                if (!tr) tries.push(names[i] + ' : rien ajout\u00e9');
-            }
-            if (!tr) {
-                throw new Error(T.noTransform + '. Essais : ' + tries.join(', ') +
-                    '. Effets "transform" de Premiere : ' + (seen.length ? seen.join(', ') : 'aucun') +
-                    '. Clip QE : ' + String(qi.name) + '. Effets du clip : ' + compList(entry.item));
-            }
+    function ensureBlur(seq, entry) {
+        var bc = blurComp(entry.item);
+        if (bc) return bc;
+        var qi = qeItemFor(seq, entry);
+        if (!qi) throw new Error(T.clipGone);
+        var seen = [], names = blurNames(seen), tries = [];
+        // chaque nom est essaye, et l'ajout verifie sur le clip : un nom inconnu ne fait rien sans erreur
+        for (var i = 0; i < names.length && !bc; i++) {
+            var fx = null, before = freshItem(seq, entry).components.numItems;
+            try { fx = qe.project.getVideoEffectByName(names[i]); } catch (e1) {}
+            if (!fx) { tries.push(names[i] + ' : inconnu'); continue; }
+            try { qi.addVideoEffect(fx); } catch (e2) { tries.push(names[i] + ' : ' + errText(e2)); continue; }
+            try { $.sleep(40); } catch (e3) {}
+            entry.item = freshItem(seq, entry);
+            bc = blurComp(entry.item);
+            if (!bc && entry.item.components.numItems > before) bc = entry.item.components[entry.item.components.numItems - 1];
+            if (!bc) tries.push(names[i] + ' : rien ajout\u00e9');
         }
-        setChecked(trParam(tr, 'uniform'), true);
-        setChecked(trParam(tr, 'useComp'), false);
-        var sh = trParam(tr, 'shutter');
-        if (sh) { try { sh.setTimeVarying(false); } catch (e3) {} try { sh.setValue(Number(shutter), true); } catch (e4) {} }
-        return tr;
+        if (!bc) {
+            throw new Error('Effet Flou directionnel introuvable. Essais : ' + tries.join(', ') +
+                '. Effets de flou de Premiere : ' + (seen.length ? seen.join(', ') : 'aucun') + '. Effets du clip : ' + compList(entry.item));
+        }
+        return bc;
     }
-
-    /** Convertisseur : position normalisee de l'image source -> unite du parametre Position de Transformation */
-    function trPosConv(param, frame) {
-        var px = posIsPx(param);
-        return function (v) { return px ? [v[0] * frame[0], v[1] * frame[1]] : [v[0], v[1]]; };
-    }
-
-    // ---------- Ecriture ----------
-    function clearKeys(param) {
-        if (!param) return;
-        try { if (param.isTimeVarying()) param.setTimeVarying(false); } catch (e) {}
-    }
-
-    function writeKeys(param, keys, conv) {
-        if (!param.isTimeVarying()) param.setTimeVarying(true);
-        // anciennes cles (celles d'origine, une ancienne cuisson, ou celle que setTimeVarying pose a la tete de lecture)
-        var existing = param.getKeys() || [], wanted = {}, i, r;
+    /**
+     * Cles [[ticks, v]] sur un parametre du flou (les autres cles du parametre sont retirees) ; liste vide :
+     * parametre fixe a 0 (aucun flou). Chaque cle est ecrite a part : une cle refusee par Premiere n'empeche
+     * pas les suivantes, et l'erreur est signalee avec le nom du parametre.
+     */
+    function writeBlur(param, keys, label, errors) {
+        if (!param) { errors.push(label + ' : param\u00e8tre introuvable'); return 0; }
+        if (!keys || !keys.length) {
+            try { if (param.isTimeVarying()) param.setTimeVarying(false); } catch (e) {}
+            try { param.setValue(0, true); } catch (e2) {}
+            return 0;
+        }
+        try { if (!param.isTimeVarying()) param.setTimeVarying(true); } catch (e3) { errors.push(label + ' : ' + errText(e3)); return 0; }
+        var wanted = {}, bad = 0, firstErr = '', i;
+        // plusieurs facons d'ecrire une cle selon les effets / versions de Premiere : la premiere qui marche est gardee
+        var ways = [
+            function (tm, v) { param.addKey(tm); param.setValueAtKey(tm, v, true); },
+            function (tm, v) { param.addKey(tm); param.setValueAtKey(tm, v); },
+            function (tm, v) { param.addKey(tm.seconds); param.setValueAtKey(tm.seconds, v, true); },
+            function (tm, v) { param.addKey(tm.seconds); param.setValueAtKey(tm.seconds, v); },
+            function (tm, v) { param.addKey(tm); param.setValueAtKey(tm, [v], true); }
+        ], way = -1;
         for (i = 0; i < keys.length; i++) {
-            var t = mkTime(keys[i][0]), v = conv ? conv(keys[i][1]) : keys[i][1];
-            wanted[t.ticks] = true;
-            param.addKey(t);
-            // updateUI = true a chaque ecriture : sinon l'interface et l'historique d'annulation de Premiere
-            // se desynchronisent, et un Ctrl+Z peut faire planter Premiere
-            param.setValueAtKey(t, v, true);
-            try { param.setInterpolationTypeAtKey(t, LINEAR, true); } catch (e) {}
+            var t = mkTime(keys[i][0]), v = Number(keys[i][1]), done = false, w;
+            if (way >= 0) { try { ways[way](t, v); done = true; } catch (e5) { if (!firstErr) firstErr = errText(e5); } }
+            for (w = 0; w < ways.length && !done; w++) {
+                try { ways[w](t, v); done = true; way = w; } catch (e8) { if (!firstErr) firstErr = 'essai ' + (w + 1) + ' : ' + errText(e8); }
+            }
+            if (!done) { bad++; continue; }
+            wanted[String(ticksOf(t))] = true;
+            try { param.setInterpolationTypeAtKey(t, LINEAR, true); } catch (e4) {}
         }
-        // retirees apres coup : le parametre ne perd jamais son animation en cours d'ecriture
-        for (r = existing.length - 1; r >= 0; r--) {
-            var old = typeof existing[r] === 'number' ? mkTime(existing[r] * TICKS) : existing[r];
-            if (!wanted[String(ticksOf(old))]) { try { param.removeKey(old); } catch (e0) {} }
+        var existing = null;
+        try { existing = param.getKeys(); } catch (e6) {}
+        // rien n'a pu etre ecrit : les anciennes cles sont laissees telles quelles
+        for (i = (existing && bad < keys.length ? existing.length : 0) - 1; i >= 0; i--) {
+            var old = typeof existing[i] === 'number' ? mkTime(existing[i] * TICKS) : existing[i];
+            if (!wanted[String(ticksOf(old))]) { try { param.removeKey(old); } catch (e7) {} }
         }
-        if (keys.length) { try { var lt = mkTime(keys[keys.length - 1][0]); param.setValueAtKey(lt, conv ? conv(keys[keys.length - 1][1]) : keys[keys.length - 1][1], true); } catch (e1) {} }
+        if (bad) {
+            // diagnostic : de quel parametre il s'agit et ce que Premiere en dit
+            var d = [];
+            try { d.push('"' + String(param.displayName) + '"'); } catch (x1) {}
+            try { var gv = param.getValue(); d.push('valeur ' + (gv && typeof gv === 'object' ? '[' + gv.length + ' nombres]' : typeof gv + ' ' + String(gv))); } catch (x2) { d.push('valeur illisible'); }
+            try { d.push(param.isTimeVarying() ? 'anim\u00e9' : 'non anim\u00e9'); } catch (x3) {}
+            try { d.push((existing ? existing.length : 0) + ' cl\u00e9s'); } catch (x4) {}
+            try { d.push('cl\u00e9 \u00e0 ' + Math.round(keys[0][0] / Number(TICKS / 1000)) + ' ms = ' + keys[0][1]); } catch (x5) {}
+            try { d.push('cl\u00e9 cr\u00e9\u00e9e : ' + (param.keyExistsAtTime(mkTime(keys[0][0])) ? 'oui' : 'non')); } catch (x6) {}
+            errors.push(label + ' : ' + bad + '/' + keys.length + ' cl\u00e9s refus\u00e9es (' + firstErr + ') ; ' + d.join(', '));
+        }
+        return keys.length - bad;
+    }
+
+    // ---------- Sori 2 : toutes les proprietes animees du clip, cles ajoutees entre deux cles ----------
+    /** Valeur exploitable par une courbe : nombre, ou couple [x, y] (position, point d'ancrage) ; sinon null */
+    function curveValue(v) {
+        if (typeof v === 'number') return isFinite(v) ? v : null;
+        if (v && typeof v === 'object' && v.length === 2) {
+            var a = Number(v[0]), b = Number(v[1]);
+            return isFinite(a) && isFinite(b) ? [a, b] : null;
+        }
+        return null;
     }
 
     /**
-     * plan = { shutter: 180, clips: [{ id, ops: [{ target: 'motion'|'opacity'|'transform', prop, keys: [[ticks, v]], staticValue?, reset? }] }] }
-     * target 'transform' + prop 'position' : valeurs normalisees dans l'image source (0.5, 0.5 = centre).
+     * 1er clip video selectionne : chaque parametre anime (2 cles au moins) de chaque effet, avec ses cles.
+     * force : relecture complete ; have : numero (stamp) de la derniere lecture recue par le panneau.
+     * ci / pi = numeros de l'effet et du parametre ; match = matchName de l'effet (verifie a l'ecriture).
      */
-    function applyPlan(planJson) {
+    var scanCache = null, scanCount = 0, scanStamp = 0;
+    function scan(force, have) {
+        try {
+            var seq = seqOrNull();
+            if (!seq) return ok({ seq: null, clip: null, props: [], total: 0 });
+            var info = {
+                name: String(seq.name), ticksPerFrame: Number(seq.timebase), playhead: ticksOf(seq.getPlayerPosition()),
+                width: Number(seq.frameSizeHorizontal), height: Number(seq.frameSizeVertical)
+            };
+            var list = selectedVideo(seq);
+            if (!list.length) { scanCache = null; return ok({ seq: info, clip: null, props: [], total: 0 }); }
+            var it = list[0].item, comps = it.components, found = [], sig = String(list[0].id), ci, pi, k;
+            // signature legere (temps des cles, sans les valeurs) : rien n'a bouge -> la derniere lecture est reprise
+            for (ci = 0; ci < comps.numItems; ci++) {
+                var ps = comps[ci].properties;
+                for (pi = 0; pi < ps.numItems; pi++) {
+                    var ks = null;
+                    try { if (!ps[pi].isTimeVarying()) continue; ks = ps[pi].getKeys(); } catch (e) { continue; }
+                    if (!ks || ks.length < 2) continue;
+                    var sum = 0;
+                    for (k = 0; k < ks.length; k++) sum += (typeof ks[k] === 'number' ? ks[k] * TICKS : Number(ks[k].ticks)) / 1e6;
+                    sig += '|' + ci + '.' + pi + ':' + ks.length + ':' + Math.round(sum);
+                    found.push({ ci: ci, pi: pi, ks: ks });
+                }
+            }
+            var clip = { id: list[0].id, name: String(it.name), start: ticksOf(it.start), end: ticksOf(it.end), inPoint: ticksOf(it.inPoint) };
+            scanCount++;
+            // une lecture complete de temps en temps : une valeur de cle retouchee ne change pas la signature
+            if (!force && scanCache && scanCache.sig === sig && scanCount % 5 !== 0) {
+                // le panneau a deja cette lecture (meme numero) : seuls la sequence et le clip sont renvoyes
+                if (have === scanCache.stamp) return ok({ seq: info, total: list.length, clip: clip, stamp: scanCache.stamp, same: true });
+                return ok({ seq: info, total: list.length, props: scanCache.props, clip: clip, motion: scanCache.motion, stamp: scanCache.stamp });
+            }
+            var props = [];
+            for (var f = 0; f < found.length; f++) {
+                var comp = comps[found[f].ci], param = comp.properties[found[f].pi], keys = [], good = true;
+                for (k = 0; k < found[f].ks.length && good; k++) {
+                    var t = typeof found[f].ks[k] === 'number' ? mkTime(found[f].ks[k] * TICKS) : found[f].ks[k], v = null;
+                    try { v = curveValue(param.getValueAtKey(t)); } catch (e2) {}
+                    if (v === null) good = false; else keys.push({ t: ticksOf(t), v: v });
+                }
+                if (!good) continue;
+                var p = { ci: found[f].ci, pi: found[f].pi, match: String(comp.matchName), comp: String(comp.displayName), name: String(param.displayName || ''), keys: keys };
+                if (isBlurComp(comp)) { var bi = blurIdx(comp); p.role = found[f].pi === bi.dir ? 'dir' : found[f].pi === bi.len ? 'len' : 'fx'; }
+                props.push(p);
+            }
+            // echelle et rotation de la Trajectoire : le flou est applique avant elles
+            var motion = { scale: 100, rotation: 0 };
+            try { var sv = Number(motionParam(it, 'scale').getValue()); if (isFinite(sv) && sv > 0) motion.scale = sv; } catch (e3) {}
+            try { var rv = Number(motionParam(it, 'rotation').getValue()); if (isFinite(rv)) motion.rotation = rv; } catch (e4) {}
+            scanCache = { sig: sig, props: props, motion: motion, stamp: ++scanStamp };
+            return ok({ seq: info, total: list.length, props: props, clip: clip, motion: motion, stamp: scanStamp });
+        } catch (e5) { return fail(errText(e5)); }
+    }
+
+    /**
+     * plan = { id, ops: [{ ci, pi, match, t0, t1, keys: [[ticks, v]] }], blur?: { add, dir: [[ticks, v]], len: [[ticks, v]] } }
+     * blur : cles du Flou directionnel, remplacees en entier (add : l'effet est ajoute s'il manque).
+     * Pour chaque parametre : les cles strictement entre t0 et t1 sont retirees, puis keys sont posees (lineaires).
+     * Les deux cles d'origine (t0, t1) ne sont jamais touchees.
+     */
+    function bake(planJson) {
         try {
             var plan = eval('(' + planJson + ')');
             var seq = seqOrNull();
             if (!seq) return fail(T.noSeq);
-            // clips retrouves dans toute la sequence (une annulation doit marcher meme si la selection a change)
-            var byId = allVideo(seq), i, j;
-            var done = 0, keysWritten = 0, errors = [], trDiag = null;
-            for (i = 0; i < plan.clips.length; i++) {
-                var pc = plan.clips[i], entry = byId[pc.id];
-                if (!entry) { errors.push(T.clipGone); continue; }
+            var entry = allVideo(seq)[String(plan.id)];
+            if (!entry) return fail(T.clipGone);
+            var comps = entry.item.components, written = 0, removed = 0, errors = [], margin = Number(seq.timebase) / 4;
+            for (var i = 0; i < plan.ops.length; i++) {
+                var op = plan.ops[i];
                 try {
-                    var needTr = false;
-                    // restauration (plan.noSetup) : on n'ajoute jamais d'effet et on ne touche pas a ses reglages
-                    if (!plan.noSetup) for (j = 0; j < pc.ops.length; j++) if (pc.ops[j].target === 'transform' && !pc.ops[j].reset) needTr = true;
-                    var tr = needTr ? ensureTransform(seq, entry, plan.shutter || 180) : transformComp(entry.item);
-                    var frame = clipFrameSize(entry.item, seq);
-                    for (j = 0; j < pc.ops.length; j++) {
-                        var op = pc.ops[j];
-                        var param = op.target === 'transform' ? trParam(tr, op.prop) : paramFor(entry.item, op.target, op.prop);
-                        if (!param) { if (!op.reset && !op.optional) errors.push(String(entry.item.name) + ' : ' + op.prop + ' introuvable'); continue; }
-                        // Transformation : seule "Hauteur d'echelle" (affichee "Echelle" en echelle uniforme) est ecrite.
-                        // La largeur est grisee en echelle uniforme : d'anciennes cles posees dessus sont retirees.
-                        if (op.target === 'transform' && op.prop === 'scale') {
-                            var sw = trIndex(tr, 'scaleWidth');
-                            if (sw >= 0 && sw !== trIndex(tr, 'scale')) {
-                                var wp = tr.properties[sw];
-                                try { if (wp.isTimeVarying()) { wp.setTimeVarying(false); wp.setValue(100, true); } } catch (ew) {}
-                            }
-                        }
-                        // l'unite (pixels / normalise) est lue avant toute ecriture
-                        var conv = op.target === 'transform' && op.prop === 'position' ? trPosConv(param, frame) : null;
-                        if (op.reset) {
-                            clearKeys(param);
-                            var neutral = op.prop === 'position' ? conv([0.5, 0.5]) : op.prop === 'scale' || op.prop === 'scaleWidth' ? 100 : 0;
-                            try { param.setValue(neutral, true); } catch (e5) {}
-                            continue;
-                        }
-                        if (op.keys && op.keys.length) {
-                            writeKeys(param, op.keys, conv);
-                            keysWritten += op.keys.length;
-                        } else if (op.staticValue !== undefined && op.staticValue !== null) {
-                            clearKeys(param);
-                            try { param.setValue(conv ? conv(op.staticValue) : op.staticValue, true); } catch (e6) {}
-                        }
+                    var comp = comps[op.ci];
+                    if (!comp || String(comp.matchName) !== op.match) { errors.push('Effet d\u00e9plac\u00e9 ou supprim\u00e9'); continue; }
+                    var param = comp.properties[op.pi];
+                    var ks = param.getKeys() || [], k;
+                    for (k = ks.length - 1; k >= 0; k--) {
+                        var old = typeof ks[k] === 'number' ? mkTime(ks[k] * TICKS) : ks[k], ot = ticksOf(old);
+                        if (ot > op.t0 + margin && ot < op.t1 - margin) { try { param.removeKey(old); removed++; } catch (e0) {} }
                     }
-                    // diagnostic : noms des parametres de Transformation tels que le script les voit
-                    if (!trDiag && tr) {
-                        var tn = [];
-                        for (var q = 0; q < tr.properties.numItems; q++) tn.push(String(tr.properties[q].displayName));
-                        trDiag = { comp: String(tr.displayName) + ' [' + String(tr.matchName) + ']', names: tn, scale: trIndex(tr, 'scale'), width: trIndex(tr, 'scaleWidth'),
-                            position: trIndex(tr, 'position'), rotation: trIndex(tr, 'rotation'), shutter: trIndex(tr, 'shutter') };
+                    for (k = 0; k < op.keys.length; k++) {
+                        var t = mkTime(op.keys[k][0]);
+                        param.addKey(t);
+                        // updateUI = true a chaque ecriture : sinon l'interface et l'historique d'annulation de Premiere
+                        // se desynchronisent, et un Ctrl+Z peut faire planter Premiere
+                        param.setValueAtKey(t, op.keys[k][1], true);
+                        try { param.setInterpolationTypeAtKey(t, LINEAR, true); } catch (e1) {}
+                        written++;
                     }
-                    done++;
-                } catch (ec) { errors.push(String(entry.item.name) + ' : ' + errText(ec)); }
+                } catch (e2) { errors.push((op.name || 'Propri\u00e9t\u00e9') + ' : ' + errText(e2)); }
             }
-            return ok({ clips: done, keys: keysWritten, errors: errors, trDiag: trDiag });
-        } catch (e) { return fail(errText(e)); }
+            var blurInfo = null;
+            if (plan.blur) {
+                try {
+                    var bc = plan.blur.add ? ensureBlur(seq, entry) : blurComp(entry.item);
+                    if (bc) {
+                        var bi = blurIdx(bc), before = errors.length;
+                        blurInfo = { effect: String(bc.displayName), len: 0, dir: 0 };
+                        blurInfo.len = writeBlur(bc.properties[bi.len], plan.blur.len, 'Flou (longueur)', errors);
+                        blurInfo.dir = writeBlur(bc.properties[bi.dir], plan.blur.dir, 'Flou (direction)', errors);
+                        if (errors.length > before) {
+                            // effet et parametres reellement vises
+                            var pn = [];
+                            for (var q = 0; q < bc.properties.numItems; q++) { try { pn.push(q + ' ' + String(bc.properties[q].displayName)); } catch (ep) { pn.push(q + ' ?'); } }
+                            errors.push('Effet : ' + String(bc.displayName) + ' [' + String(bc.matchName) + '], longueur n\u00b0 ' + bi.len + ', direction n\u00b0 ' + bi.dir + ', param\u00e8tres : ' + pn.join(' / '));
+                        }
+                    }
+                } catch (eb) { errors.push('Flou : ' + errText(eb)); }
+            }
+            scanCache = null;
+            return ok({ keys: written, removed: removed, errors: errors, blur: blurInfo });
+        } catch (e3) { return fail(errText(e3)); }
     }
 
     // rev : a augmenter a chaque modification, le panneau recharge alors ce fichier sans redemarrer Premiere
-    return { rev: 12, readSelection: readSelection, readClip: readClip, summary: summary, applyPlan: applyPlan };
+    return { rev: 20, scan: scan, bake: bake };
 })();
