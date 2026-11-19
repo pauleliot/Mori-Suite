@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Scissors, MessageSquare, FileAudio, FolderTree, Settings, Package, Activity, Power, CheckCircle2, AlertCircle, ArrowRightLeft, Volume2, FolderSync, Play, Sparkles, X, Plus, Trash2, Film, FolderOpen, Pencil, Check, RotateCcw, FileSpreadsheet, Image as ImageIcon, CheckCircle, Download, Copy, Clock, Tag, Filter, Send, Layers, ChevronRight, Maximize2, Minimize2, Sliders, Settings2, HelpCircle, AlertTriangle, Info, ShieldCheck, ListChecks, Archive, Menu, Search, Palette } from 'lucide-react';
+import { Scissors, MessageSquare, FileAudio, FolderTree, Settings, Package, Activity, Power, CheckCircle2, AlertCircle, ArrowRightLeft, Volume2, FolderSync, Play, Sparkles, X, Plus, Trash2, Film, FolderOpen, Pencil, Check, RotateCcw, FileSpreadsheet, CheckCircle, Download, Copy, Clock, Tag, Filter, Send, Layers, ChevronRight, Maximize2, Minimize2, Sliders, Settings2, HelpCircle, AlertTriangle, Info, ShieldCheck, ListChecks, Archive, Menu, Search, Palette } from 'lucide-react';
 
 // ==================== types/index.ts ====================
 
@@ -3963,35 +3963,50 @@ const TrimEditor: React.FC<{
     const { view: vw } = latest.current;
     return vw.v0 + Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) * (vw.v1 - vw.v0);
   };
-  const onPointerDown = (e: React.PointerEvent) => {
+  /**
+   * Poignée sous la souris : le trait IN ou OUT, ou son étiquette (IN à droite du trait, OUT à gauche). Avant, seul
+   * le trait comptait (7 px de part et d'autre) : en attrapant l'étiquette, on déplaçait la tête de lecture.
+   */
+  const handleAt = (clientX: number): 'in' | 'out' | null => {
     const rect = areaRef.current!.getBoundingClientRect();
-    const span = view.v1 - view.v0;
-    const px = (t: number) => ((t - view.v0) / span) * rect.width + rect.left;
-    if (Math.abs(e.clientX - px(inT)) <= 7) dragRef.current = 'in';
-    else if (Math.abs(e.clientX - px(outT)) <= 7) dragRef.current = 'out';
-    else {
-      dragRef.current = 'seek';
-      seek(timeAt(e.clientX));
-    }
-    try {
-      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    } catch {}
+    const { view: vw } = latest.current;
+    const span = vw.v1 - vw.v0;
+    const px = (t: number) => ((t - vw.v0) / span) * rect.width + rect.left;
+    const inX = px(latest.current.inT), outX = px(latest.current.outT);
+    const onIn = clientX >= inX - 8 && clientX <= inX + 22;
+    const onOut = clientX >= outX - 22 && clientX <= outX + 8;
+    if (onIn && onOut) return Math.abs(clientX - inX) <= Math.abs(clientX - outX) ? 'in' : 'out';
+    return onIn ? 'in' : onOut ? 'out' : null;
   };
-  const onPointerMove = (e: React.PointerEvent) => {
-    const mode = dragRef.current;
-    if (!mode) {
-      const rect = areaRef.current!.getBoundingClientRect();
-      const span = view.v1 - view.v0;
-      const near = [inT, outT].some((t) => Math.abs(e.clientX - (((t - view.v0) / span) * rect.width + rect.left)) <= 7);
-      (e.currentTarget as HTMLElement).style.cursor = near ? 'ew-resize' : 'pointer';
-      return;
-    }
-    const t = timeAt(e.clientX);
-    if (mode === 'in') setIn(t);
-    else if (mode === 'out') setOut(t);
-    else seek(t);
+  // Glisser : suivi sur toute la fenêtre jusqu'au relâchement (comme la poignée des Retours). La capture du
+  // pointeur sur la zone ne suivait pas le glisser de façon fiable sur Mac.
+  const onMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const mode = handleAt(e.clientX) || 'seek';
+    dragRef.current = mode;
+    if (mode === 'seek') seek(timeAt(e.clientX));
+    const move = (ev: MouseEvent) => {
+      if (ev.buttons === 0) return up();
+      const t = timeAt(ev.clientX);
+      if (mode === 'in') setIn(t);
+      else if (mode === 'out') setOut(t);
+      else seek(t);
+    };
+    const up = () => {
+      dragRef.current = null;
+      window.removeEventListener('mousemove', move, true);
+      window.removeEventListener('mouseup', up, true);
+      window.removeEventListener('blur', up);
+    };
+    window.addEventListener('mousemove', move, true);
+    window.addEventListener('mouseup', up, true);
+    window.addEventListener('blur', up);
   };
-  const onPointerUp = () => (dragRef.current = null);
+  const onHover = (e: React.MouseEvent) => {
+    if (dragRef.current) return;
+    (e.currentTarget as HTMLElement).style.cursor = handleAt(e.clientX) ? 'ew-resize' : 'pointer';
+  };
 
   const span = view.v1 - view.v0;
   const pct = (t: number) => `${((t - view.v0) / span) * 100}%`;
@@ -4017,10 +4032,8 @@ const TrimEditor: React.FC<{
 
       <div
         ref={areaRef}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
+        onMouseDown={onMouseDown}
+        onMouseMove={onHover}
         className="relative h-16 rounded-lg bg-zinc-950 border border-white/10 overflow-hidden select-none touch-none"
         title="Clic : se placer · glisser IN / OUT · molette : zoom · Maj+molette : défiler"
       >
@@ -5621,18 +5634,29 @@ export const WebDownloader: React.FC = () => {
   const updateJob = (id: string, patch: Partial<DownloadJob>) =>
     setJobs((prev) => prev.map((j) => (j.id === id ? { ...j, ...patch } : j)));
 
-  const handleAnalyze = async (target = url) => {
+  // analyses lancées : seule la dernière demandée met l'affichage à jour (un clic sur un autre résultat entre-temps)
+  const analyzeSeqRef = useRef(0);
+  /**
+   * Lit les formats d'une vidéo. provisional : ce que la recherche sait déjà (titre, durée, miniature) ; les réglages
+   * de téléchargement s'affichent alors tout de suite, et les résolutions réelles arrivent avec l'analyse (~3 s chez
+   * YouTube, qu'aucune option de yt-dlp ne raccourcit sans perdre de résolutions).
+   */
+  const handleAnalyze = async (target = url, provisional?: OnlineMediaInfo) => {
     const link = target.trim();
     if (!ytdlp || !link) return;
+    const seq = ++analyzeSeqRef.current;
     setIsAnalyzing(true);
     setAnalyzeError(null);
-    setInfo(null);
+    setInfo(provisional || null);
     try {
-      setInfo(await fetchOnlineMediaInfo(ytdlp, link));
+      const full = await fetchOnlineMediaInfo(ytdlp, link);
+      if (seq !== analyzeSeqRef.current) return;
+      setInfo(provisional ? { ...full, url: provisional.url, title: provisional.title || full.title } : full);
     } catch (err: any) {
+      if (seq !== analyzeSeqRef.current) return;
       setAnalyzeError(err?.message || String(err));
     } finally {
-      setIsAnalyzing(false);
+      if (seq === analyzeSeqRef.current) setIsAnalyzing(false);
     }
   };
 
@@ -5651,6 +5675,8 @@ export const WebDownloader: React.FC = () => {
       const found = await searchYoutube(ytdlp, q, searchCount);
       setResults(found);
       setSearchedFor(q);
+      // les deux premiers résultats sont lus d'avance : leurs formats et leur aperçu s'ouvrent sans attendre
+      found.filter((r) => !r.live).slice(0, 2).forEach((r) => prefetchOnlineMedia(ytdlp, r.url));
     } catch (err: any) {
       setSearchError(err?.message || String(err));
     } finally {
@@ -5663,12 +5689,14 @@ export const WebDownloader: React.FC = () => {
   /** Résultat choisi : analysé comme un lien collé (formats, résolutions), la liste reste affichée */
   const pickResult = (r: YoutubeSearchResult) => {
     if (selectedResult === r.id) {
+      analyzeSeqRef.current++;
+      setIsAnalyzing(false);
       setSelectedResult(null);
       setInfo(null);
       return;
     }
     setSelectedResult(r.id);
-    handleAnalyze(r.url);
+    handleAnalyze(r.url, { url: r.url, title: r.title, uploader: r.channel, durationSec: r.durationSec, thumbnail: r.thumbnail, heights: [] });
   };
 
   const handleDownload = () => {
@@ -5696,12 +5724,44 @@ export const WebDownloader: React.FC = () => {
       { id: `dl-${Date.now()}-${++downloadSeq}`, url: r.url, title: r.title, format, maxHeight, wav: currentWav, status: 'queued', progress: 0 },
     ]);
   };
+
+  /** Fichier déjà téléchargé pour ce résultat (dernier téléchargement terminé, fichier encore présent), sinon '' */
+  const downloadedFile = (link: string): string => {
+    const fs = nodeRequire('fs');
+    for (let i = jobs.length - 1; i >= 0; i--) {
+      const j = jobs[i];
+      if (j.url === link && j.status === 'done' && j.output && !j.section) {
+        try {
+          if (fs && fs.existsSync(j.output)) return j.output;
+        } catch {}
+      }
+    }
+    return '';
+  };
+  // Glisser un résultat déjà téléchargé (✓) : le fichier part comme depuis l'Explorateur ou le Finder, et Premiere
+  // le pose là où il est lâché (timeline, chutier). Pas encore téléchargé : le glisser lance le téléchargement.
+  const [dragHint, setDragHint] = useState('');
+  const onResultDragStart = (e: React.DragEvent, r: YoutubeSearchResult) => {
+    const file = downloadedFile(r.url);
+    if (!file) {
+      e.preventDefault();
+      if (!r.live && !isQueued(r.url)) quickDownload(r);
+      setDragHint(`« ${r.title} » se télécharge : glissez-le sur la timeline dès que ✓ apparaît.`);
+      setTimeout(() => setDragHint(''), 5000);
+      return;
+    }
+    const uri = 'file://' + (isWindowsPlatform() ? '/' + file.replace(/\\/g, '/') : file);
+    e.dataTransfer.effectAllowed = 'copy';
+    e.dataTransfer.setData('com.adobe.cep.dnd.file.0', file);
+    e.dataTransfer.setData('text/uri-list', encodeURI(uri));
+    e.dataTransfer.setData('text/plain', file);
+  };
   const isQueued = (link: string) => jobs.some((j) => j.url === link && ACTIVE_DOWNLOAD_STATUSES.includes(j.status));
   // résultat survolé un instant : son extraction part d'avance, l'aperçu et les formats s'ouvrent alors sans attendre
   const hoverTimerRef = useRef<any>(null);
   const hoverResult = (r: YoutubeSearchResult | null) => {
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
-    hoverTimerRef.current = r && ytdlp && !r.live ? setTimeout(() => prefetchOnlineMedia(ytdlp, r.url), 350) : null;
+    hoverTimerRef.current = r && ytdlp && !r.live ? setTimeout(() => prefetchOnlineMedia(ytdlp, r.url), 150) : null;
   };
 
   // yt-dlp : version affichée et mise à jour depuis le panneau
@@ -5861,7 +5921,8 @@ export const WebDownloader: React.FC = () => {
   };
 
   const ready = nodeOk && !!ytdlp;
-  const availableHeights = info ? QUALITY_CHOICES.filter((h) => info.heights.some((x) => x >= h * 0.9)) : QUALITY_CHOICES;
+  const availableHeights =
+    info && info.heights.length ? QUALITY_CHOICES.filter((h) => info.heights.some((x) => x >= h * 0.9)) : QUALITY_CHOICES;
   const hasFinished = jobs.some((j) => !ACTIVE_DOWNLOAD_STATUSES.includes(j.status));
   const ghostButton =
     'flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full border border-white/15 text-zinc-200 hover:text-cream-300 hover:border-cream-300/60 text-xs font-semibold transition cursor-pointer disabled:opacity-40 disabled:cursor-default';
@@ -6123,10 +6184,18 @@ export const WebDownloader: React.FC = () => {
                   <div key={r.id} className={open ? 'bg-white/[0.04]' : ''}>
                     <button
                       onClick={() => pickResult(r)}
+                      draggable={!r.live}
+                      onDragStart={(e) => onResultDragStart(e, r)}
                       onMouseEnter={() => hoverResult(r)}
                       onMouseLeave={() => hoverResult(null)}
                       className="w-full flex gap-2.5 p-2 text-left hover:bg-white/[0.03] transition cursor-pointer"
-                      title={r.live ? 'Direct : ne peut pas être téléchargé' : 'Choisir le format et télécharger'}
+                      title={
+                        r.live
+                          ? 'Direct : ne peut pas être téléchargé'
+                          : downloadedFile(r.url)
+                          ? 'Téléchargé : glissez-le sur la timeline ou dans un chutier'
+                          : 'Choisir le format et télécharger (⬇ : tout de suite, puis glisser sur la timeline une fois ✓)'
+                      }
                     >
                       <div className="relative w-24 flex-shrink-0 group/thumb">
                         <img src={r.thumbnail} alt="" loading="lazy" className="w-24 aspect-video object-cover rounded-md border border-white/10 bg-zinc-900" />
@@ -6161,12 +6230,20 @@ export const WebDownloader: React.FC = () => {
                           role="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (!isQueued(r.url)) quickDownload(r);
+                            if (!isQueued(r.url) && !downloadedFile(r.url)) quickDownload(r);
                           }}
-                          title={isQueued(r.url) ? 'Déjà dans les téléchargements' : `Télécharger tout de suite (${format === 'video' ? `MP4${maxHeight ? ` ${maxHeight}p` : ''}` : 'WAV'})`}
-                          className={`p-1 rounded transition flex-shrink-0 ${isQueued(r.url) ? 'text-emerald-300' : 'text-zinc-500 hover:text-zinc-200'}`}
+                          title={
+                            downloadedFile(r.url)
+                              ? 'Téléchargé : glissez-le sur la timeline ou dans un chutier'
+                              : isQueued(r.url)
+                              ? 'Téléchargement en cours'
+                              : `Télécharger tout de suite (${format === 'video' ? `MP4${maxHeight ? ` ${maxHeight}p` : ''}` : 'WAV'})`
+                          }
+                          className={`p-1 rounded transition flex-shrink-0 ${
+                            downloadedFile(r.url) ? 'text-emerald-300' : isQueued(r.url) ? 'text-zinc-400 animate-pulse' : 'text-zinc-500 hover:text-zinc-200'
+                          }`}
                         >
-                          {isQueued(r.url) ? <CheckCircle2 className="w-4 h-4" /> : <Download className="w-4 h-4" />}
+                          {downloadedFile(r.url) ? <CheckCircle2 className="w-4 h-4" /> : <Download className="w-4 h-4" />}
                         </span>
                       )}
                     </button>
@@ -6177,10 +6254,14 @@ export const WebDownloader: React.FC = () => {
                     )}
                     {open && (
                       <div className="px-2 pb-2 space-y-1.5">
-                        {isAnalyzing && <StatusMessage busy message="Lecture des formats disponibles…" />}
+                        {isAnalyzing && !info && <StatusMessage busy message="Lecture des formats disponibles…" />}
                         {info && (
                           <>
-                            {info.heights[0] ? <div className="text-[10px] text-zinc-500">Jusqu'à {info.heights[0]}p</div> : null}
+                            {info.heights[0] ? (
+                              <div className="text-[10px] text-zinc-500">Jusqu'à {info.heights[0]}p</div>
+                            ) : isAnalyzing ? (
+                              <div className="text-[10px] text-zinc-500 animate-pulse">Lecture des résolutions disponibles…</div>
+                            ) : null}
                             {downloadControls}
                           </>
                         )}
@@ -6232,6 +6313,7 @@ export const WebDownloader: React.FC = () => {
             </button>
           </div>
         )}
+        {dragHint && <div className="text-[11px] text-cream-300">{dragHint}</div>}
         <p className="text-[10px] text-zinc-500">Ne téléchargez que des vidéos dont vous avez les droits d'utilisation.</p>
       </section>
 
@@ -6382,10 +6464,13 @@ const EMPTY_PRESET: Omit<DeliveryPreset, 'id' | 'name'> = {
   startTc: null, somTc: null, tone: false, blackBeforeSom: null, maxBlackMuted: null, maxSilence: null, pse: false,
 };
 
-/** PAD HD selon la recommandation CST RT-040 : MXF XDCAM HD422 (MPEG-2 422P@HL 50 Mb/s), 1080i25 trame haute, PCM 24 bits 48 kHz */
+/**
+ * PAD HD selon la recommandation CST RT-040 : MXF XDCAM HD422 (MPEG-2 422P@HL 50 Mb/s), 1080i25 trame haute, PCM 24 bits
+ * 48 kHz. GOP long de 12 images (M=3) : l'XDCAM HD422 est en GOP ouvert, il n'est donc pas exigé fermé.
+ */
 const RT040_VIDEO = {
   container: 'mxf', videoCodec: 'mpeg2video', width: 1920, height: 1080, fps: 25, scan: 'tff' as const, chroma: '422' as const, bitrateMbps: 50,
-  gopN: 12, gopM: 3, gopClosed: true,
+  gopN: 12, gopM: 3, gopClosed: false,
   sampleRate: 48000, bitDepth: 24, audioPcm: true, legalLevels: true, pse: true,
 };
 
@@ -6426,6 +6511,8 @@ export const DEFAULT_DELIVERY_PRESETS: DeliveryPreset[] = [
 const DELIVERY_BUILTINS_KNOWN_KEY = 'cutflow.deliveryPresetsKnown';
 
 const DELIVERY_PRESETS_KEY = 'cutflow.deliveryPresets';
+const DELIVERY_GOP_FIX_KEY = 'cutflow.deliveryGopOpenFix';
+const RT040_PRESET_IDS = ['norm-ftv-long', 'norm-ftv-court', 'norm-tf1'];
 export function loadDeliveryPresets(): DeliveryPreset[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(DELIVERY_PRESETS_KEY) || 'null');
@@ -6433,7 +6520,17 @@ export function loadDeliveryPresets(): DeliveryPreset[] {
       const known: string[] = JSON.parse(localStorage.getItem(DELIVERY_BUILTINS_KNOWN_KEY) || '["norm-web","norm-ebu","norm-canal"]');
       const added = DEFAULT_DELIVERY_PRESETS.filter((d) => !known.includes(d.id) && !parsed.some((p: any) => p.id === d.id));
       const withDefaults = (p: any) => ({ ...EMPTY_PRESET, ...(DEFAULT_DELIVERY_PRESETS.find((d) => d.id === p.id) || {}), ...p });
-      return [...parsed.map(withDefaults), ...added.map((d) => ({ ...d }))];
+      const list = [...parsed.map(withDefaults), ...added.map((d) => ({ ...d }))];
+      // une fois : les normes RT-040 fournies (France TV, TF1) exigeaient à tort un GOP fermé (l'XDCAM HD422 est en
+      // GOP ouvert, tout PAD conforme sortait en erreur)
+      if (!localStorage.getItem(DELIVERY_GOP_FIX_KEY)) {
+        list.forEach((p) => {
+          if (p.builtIn && RT040_PRESET_IDS.includes(p.id)) p.gopClosed = false;
+        });
+        localStorage.setItem(DELIVERY_GOP_FIX_KEY, '1');
+        saveDeliveryPresets(list);
+      }
+      return list;
     }
   } catch {}
   return DEFAULT_DELIVERY_PRESETS.map((p) => ({ ...p }));
@@ -6991,6 +7088,235 @@ function runFfmpegAnalysis(
   });
 }
 
+// ---------- Contrôle image par image : niveaux légaux et flashs ----------
+// Taille de l'image analysée : un échantillon de pixels (mise à l'échelle sans moyenne), assez fin pour la règle
+// des 1 % de surface et pour la grille des flashs, assez léger pour un programme de 90 min
+export const QC_W = 96;
+export const QC_H = 54;
+const QC_GRID_X = 8;
+const QC_GRID_Y = 8;
+
+/**
+ * Niveaux légaux (EBU R103) et flashs (règles PSE d'Ofcom / ITU-R BT.1702), image par image, à partir d'images
+ * YUV 4:4:4 brutes (8 ou 10 bits, plage limitée).
+ *
+ * Niveaux : un pixel est hors tolérances si sa luminance sort de −1 % à 103 % (8 bits : 14-241) ou si l'une de ses
+ * composantes R, G, B sort de −5 % à 105 %. Une image est en défaut au-delà de 1 % de sa surface hors tolérances
+ * (marge admise par R103). Avant : un seul pixel hors 16-235 suffisait, d'où des erreurs sur des PAD conformes.
+ *
+ * Flashs : la luminance est convertie en lumière réelle (écran de référence de 200 cd/m², gamma 2,4). Une
+ * variation compte si elle atteint 20 cd/m² et que l'état le plus sombre reste sous 160 cd/m², sur au moins un
+ * quart de l'écran (grille de 8 × 8 zones). Plus de 6 variations opposées (plus de 3 flashs) en une seconde :
+ * passage en défaut. Avant : moyenne de toute l'image en valeurs de pixel (fausses alertes dans les scènes sombres,
+ * flashs clairs ou localisés ignorés). Indicatif : ne teste ni les flashs rouges ni les motifs.
+ */
+export class VideoQcAccumulator {
+  readonly frameBytes: number;
+  private w: number;
+  private h: number;
+  private bps: number;
+  private fps: number;
+  private kr: number;
+  private kb: number;
+  private cellOf: Int32Array;
+  private cellCount: Float64Array;
+  private cellSum: Float64Array;
+  private lin: Float64Array;
+  // état des flashs par zone
+  private minSince: Float64Array;
+  private maxSince: Float64Array;
+  private dir: Int8Array;
+  private lastCellDir: Int8Array;
+  private lastCellFrame: Int32Array;
+  private screenDir = 0;
+  private transitions: number[] = [];
+  // résultats des niveaux
+  private n = 0;
+  private yMin = Infinity;
+  private yMax = -Infinity;
+  private badFrames = 0;
+  private slightFrames = 0;
+  private worstOut = 0;
+  private levelPassages: [number, number, number][] = [];
+
+  constructor(w: number, h: number, bytesPerSample: 1 | 2, matrix: '601' | '709', fps: number) {
+    this.w = w;
+    this.h = h;
+    this.bps = bytesPerSample;
+    this.fps = fps > 0 ? fps : 25;
+    this.frameBytes = w * h * 3 * bytesPerSample;
+    // coefficients de luminance de la matrice (Kr, Kb)
+    this.kr = matrix === '601' ? 0.299 : 0.2126;
+    this.kb = matrix === '601' ? 0.114 : 0.0722;
+    const cells = QC_GRID_X * QC_GRID_Y;
+    this.cellOf = new Int32Array(w * h);
+    this.cellCount = new Float64Array(cells);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const c = Math.min(QC_GRID_Y - 1, Math.floor((y * QC_GRID_Y) / h)) * QC_GRID_X + Math.min(QC_GRID_X - 1, Math.floor((x * QC_GRID_X) / w));
+        this.cellOf[y * w + x] = c;
+        this.cellCount[c]++;
+      }
+    }
+    this.cellSum = new Float64Array(cells);
+    this.lin = new Float64Array(1024);
+    for (let i = 0; i < 1024; i++) {
+      const yn = Math.min(1, Math.max(0, (i / 4 - 16) / 219));
+      this.lin[i] = 200 * Math.pow(yn, 2.4);
+    }
+    this.minSince = new Float64Array(cells);
+    this.maxSince = new Float64Array(cells);
+    this.dir = new Int8Array(cells);
+    this.lastCellDir = new Int8Array(cells);
+    this.lastCellFrame = new Int32Array(cells).fill(-1000);
+  }
+
+  /** Une image brute (planes Y, U, V à la suite) */
+  addFrame(buf: Uint8Array) {
+    const { w, h, bps } = this;
+    const px = w * h;
+    const plane = px * bps;
+    const sample = (i: number) => (bps === 2 ? (buf[i * 2] | (buf[i * 2 + 1] << 8)) / 4 : buf[i]); // en échelle 8 bits
+    const kr = this.kr, kb = this.kb, kg = 1 - kr - kb;
+    const crR = 2 * (1 - kr), cbB = 2 * (1 - kb), cbG = (2 * kb * (1 - kb)) / kg, crG = (2 * kr * (1 - kr)) / kg;
+    let out = 0;
+    this.cellSum.fill(0);
+    for (let i = 0; i < px; i++) {
+      const Y = sample(i);
+      const Cb = bps === 2 ? (buf[plane + i * 2] | (buf[plane + i * 2 + 1] << 8)) / 4 : buf[plane + i];
+      const Cr = bps === 2 ? (buf[2 * plane + i * 2] | (buf[2 * plane + i * 2 + 1] << 8)) / 4 : buf[2 * plane + i];
+      if (Y < this.yMin) this.yMin = Y;
+      if (Y > this.yMax) this.yMax = Y;
+      const yn = (Y - 16) / 219, cb = (Cb - 128) / 224, cr = (Cr - 128) / 224;
+      const R = yn + crR * cr, G = yn - cbG * cb - crG * cr, B = yn + cbB * cb;
+      if (yn < -0.01 || yn > 1.03 || R < -0.05 || R > 1.05 || G < -0.05 || G > 1.05 || B < -0.05 || B > 1.05) out++;
+      this.cellSum[this.cellOf[i]] += this.lin[Math.max(0, Math.min(1023, Math.round(Y * 4)))];
+    }
+    const frame = this.n++;
+    // niveaux
+    const outFrac = out / px;
+    if (outFrac > this.worstOut) this.worstOut = outFrac;
+    if (outFrac > 0.01) {
+      this.badFrames++;
+      const last = this.levelPassages[this.levelPassages.length - 1];
+      if (last && frame - last[1] <= 1) {
+        last[1] = frame;
+        last[2] = Math.max(last[2], outFrac);
+      } else this.levelPassages.push([frame, frame, outFrac]);
+    } else if (out > 0) this.slightFrames++;
+    // flashs : variations par zone, puis variation « d'écran » quand elles couvrent au moins un quart de l'image
+    const cells = this.cellSum.length;
+    let rise = 0, fall = 0;
+    for (let c = 0; c < cells; c++) {
+      const L = this.cellSum[c] / this.cellCount[c];
+      if (frame === 0) {
+        this.minSince[c] = this.maxSince[c] = L;
+        continue;
+      }
+      this.minSince[c] = Math.min(this.minSince[c], L);
+      this.maxSince[c] = Math.max(this.maxSince[c], L);
+      if (this.dir[c] !== 1 && L - this.minSince[c] >= 20 && this.minSince[c] < 160) {
+        this.dir[c] = 1;
+        this.maxSince[c] = L;
+        this.lastCellDir[c] = 1;
+        this.lastCellFrame[c] = frame;
+      } else if (this.dir[c] !== -1 && this.maxSince[c] - L >= 20 && L < 160) {
+        this.dir[c] = -1;
+        this.minSince[c] = L;
+        this.lastCellDir[c] = -1;
+        this.lastCellFrame[c] = frame;
+      }
+      // zones passées dans le même sens sur les 3 dernières images (variation progressive d'une image à l'autre)
+      if (frame - this.lastCellFrame[c] <= 2) {
+        if (this.lastCellDir[c] === 1) rise++;
+        else if (this.lastCellDir[c] === -1) fall++;
+      }
+    }
+    const quarter = cells / 4;
+    const d = rise >= quarter && rise >= fall ? 1 : fall >= quarter ? -1 : 0;
+    if (d !== 0 && d !== this.screenDir) {
+      this.screenDir = d;
+      this.transitions.push(frame);
+    }
+  }
+
+  finish() {
+    const win = Math.max(1, Math.round(this.fps));
+    const passages: [number, number, number][] = [];
+    let maxInWindow = 0;
+    const t = this.transitions;
+    for (let a = 0, b = 0; b < t.length; b++) {
+      while (t[b] - t[a] >= win) a++;
+      const count = b - a + 1;
+      maxInWindow = Math.max(maxInWindow, count);
+      if (count <= 6) continue;
+      const last = passages[passages.length - 1];
+      if (last && t[a] <= last[1] + win) {
+        last[1] = t[b];
+        last[2] = Math.max(last[2], count);
+      } else passages.push([t[a], t[b], count]);
+    }
+    return {
+      frames: this.n,
+      yMin: Number.isFinite(this.yMin) ? Math.round(this.yMin) : 0,
+      yMax: Number.isFinite(this.yMax) ? Math.round(this.yMax) : 0,
+      badFrames: this.badFrames,
+      slightFrames: this.slightFrames,
+      worstOut: this.worstOut,
+      levelPassages: this.levelPassages,
+      flashPassages: passages,
+      maxFlashesPerSecond: Math.floor(maxInWindow / 2),
+    };
+  }
+}
+
+/** FFmpeg en sortie brute (images de frameBytes octets, données une par une) */
+function runFfmpegRaw(
+  tools: FfmpegTools,
+  args: string[],
+  durationSec: number,
+  onProgress: (ratio: number) => void,
+  frameBytes: number,
+  onFrame: (frame: Uint8Array) => void
+): Promise<void> {
+  const cp = nodeRequire('child_process');
+  const B = (window as any).cep_node?.Buffer;
+  return new Promise((resolve, reject) => {
+    const child = trackChild(cp.spawn(tools.ffmpeg, ['-hide_banner', '-nostats', '-progress', 'pipe:2', ...args], { windowsHide: true }));
+    let stderr = '';
+    let pending: any = null;
+    let failed: any = null;
+    child.stdout.on('data', (d: any) => {
+      if (failed) return;
+      let chunk = pending ? B.concat([pending, d]) : d;
+      let off = 0;
+      try {
+        while (chunk.length - off >= frameBytes) {
+          onFrame(chunk.subarray(off, off + frameBytes));
+          off += frameBytes;
+        }
+      } catch (err) {
+        failed = err;
+        killProcessTree(child);
+        return;
+      }
+      pending = off < chunk.length ? chunk.subarray(off) : null;
+    });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (d: string) => {
+      const m = d.match(/out_time_(?:us|ms)=(\d+)/g);
+      if (m && durationSec > 0) onProgress(Math.min(1, parseInt(m[m.length - 1].split('=')[1], 10) / 1e6 / durationSec));
+      stderr = (stderr + d.replace(/^(?:\w+=.*\r?\n)+/gm, '')).slice(-200000);
+    });
+    child.on('error', reject);
+    child.on('close', (code: number) => {
+      if (failed) reject(failed);
+      else if (code === 0) resolve();
+      else reject(new Error(stderr.trim().split(/\r?\n/).slice(-2).join(' ') || `FFmpeg a échoué (code ${code})`));
+    });
+  });
+}
+
 interface LoudnessMeasure {
   integrated: number | null;
   lra: number | null;
@@ -7351,80 +7677,62 @@ export async function checkDeliveryFile(
     else {
       onStep('Analyse image par image (niveaux, flashs)…', 0);
       const ten = /10|12/.test(String(v.pix_fmt || ''));
-      const lo = ten ? 64 : 16, hi = ten ? 940 : 235, full = ten ? 1023 : 255;
-      const frames: { t: number; min: number; max: number; avg: number }[] = [];
-      let cur: any = null;
       const start = somOffset || 0;
-      await runFfmpegAnalysis(
+      // image réduite (échantillon de pixels, sans moyenne : les valeurs extrêmes restent réelles), en YUV 4:4:4
+      const qc = new VideoQcAccumulator(QC_W, QC_H, ten ? 2 : 1, (Number(v.height) || 1080) < 720 ? '601' : '709', fps || 25);
+      await runFfmpegRaw(
         tools,
         [
           ...(start ? ['-ss', String(start)] : []), '-i', file, '-map', '0:v:0',
-          // un seul filtre d'affichage : plusieurs écrivant sur la sortie standard mélangent leurs images
-          '-vf', 'scale=480:-2:flags=neighbor,signalstats,metadata=mode=print:file=-',
-          '-f', 'null', '-',
+          '-vf', `scale=${QC_W}:${QC_H}:flags=neighbor,format=${ten ? 'yuv444p10le' : 'yuv444p'}`,
+          '-f', 'rawvideo', 'pipe:1',
         ],
         Math.max(1, duration - start),
         (r) => onStep('Analyse image par image (niveaux, flashs)…', r),
-        (line) => {
-          const f = line.match(/pts_time:([\d.]+)/);
-          if (f) {
-            const t = parseFloat(f[1]);
-            if (!cur || cur.t !== t) {
-              cur = { t, min: NaN, max: NaN, avg: NaN };
-              frames.push(cur);
-            }
-            return;
-          }
-          const m = line.match(/lavfi\.signalstats\.(YMIN|YMAX|YAVG)=([\d.]+)/);
-          if (m && cur) cur[m[1] === 'YMIN' ? 'min' : m[1] === 'YMAX' ? 'max' : 'avg'] = parseFloat(m[2]);
-        }
+        qc.frameBytes,
+        (frame) => qc.addFrame(frame)
       );
-      const tcAt = (t: number) => (startSec !== null ? formatTc(startSec + start + t, fps) : formatTc(start + t, fps));
+      const r = qc.finish();
+      const tcAt = (frameIndex: number) => {
+        const t = start + frameIndex / (fps || 25);
+        return startSec !== null ? formatTc(startSec + t, fps) : formatTc(t, fps);
+      };
+      const span = (sIdx: number, eIdx: number) => (eIdx > sIdx ? `${tcAt(sIdx)} → ${tcAt(eIdx)}` : tcAt(sIdx));
       if (groups.levels && p.legalLevels) {
-        const bad = frames.filter((f) => f.min < lo || f.max > hi);
-        const worstMin = Math.min(...frames.map((f) => f.min));
-        const worstMax = Math.max(...frames.map((f) => f.max));
+        const label = 'Niveaux légaux (EBU R103)';
+        const strict = `luminance ${fmtNum(r.yMin)}-${fmtNum(r.yMax)} (plage 16-235)`;
         results.push(
-          bad.length
-            ? { id: 'levels', label: `Niveaux légaux (${lo}-${hi})`, status: 'error', summary: `${bad.length} image(s) hors plage (${fmtNum((bad.length / Math.max(1, frames.length)) * 100)} %) · min ${worstMin} / max ${worstMax}`, details: bad.slice(0, 8).map((f) => ({ text: `${tcAt(f.t)} · Y ${f.min}-${f.max}` })) }
-            : { id: 'levels', label: `Niveaux légaux (${lo}-${hi})`, status: 'ok', summary: frames.length ? `min ${worstMin} / max ${worstMax}` : 'aucune image analysée' }
+          r.frames === 0
+            ? { id: 'levels', label, status: 'info', summary: 'aucune image analysée' }
+            : r.badFrames > 0
+            ? {
+                id: 'levels', label, status: 'error',
+                summary: `${r.badFrames} image(s) avec plus de 1 % de la surface hors tolérances (pire : ${fmtNum(r.worstOut * 100)} % de l'image) · ${strict}`,
+                details: r.levelPassages.slice(0, 8).map(([sIdx, eIdx, worst]) => ({
+                  text: `${span(sIdx, eIdx)} : jusqu'à ${fmtNum(worst * 100)} % de l'image hors tolérances`,
+                })),
+              }
+            : r.slightFrames > 0
+            ? {
+                id: 'levels', label, status: 'warn',
+                summary: `dans les tolérances, mais ${r.slightFrames} image(s) avec de petites zones hors tolérances (moins de 1 % de la surface) · ${strict}`,
+              }
+            : { id: 'levels', label, status: 'ok', summary: `dans les tolérances (luminance −1 % à 103 %, couleurs −5 % à 105 %) · ${strict}` }
         );
       }
       if (groups.pse && p.pse) {
-        // Flash : deux variations opposées d'au moins 10 % de luminance moyenne, la plus sombre sous 80 % ; > 3 flashs sur une seconde
-        const lum = frames.map((f) => f.avg / full);
-        const transitions: number[] = [];
-        let minSince = lum[0] ?? 0;
-        let maxSince = lum[0] ?? 0;
-        let dir = 0;
-        for (let i = 1; i < lum.length; i++) {
-          const x = lum[i];
-          minSince = Math.min(minSince, x);
-          maxSince = Math.max(maxSince, x);
-          if (dir !== 1 && x - minSince >= 0.1 && minSince < 0.8) {
-            transitions.push(i);
-            dir = 1;
-            maxSince = x;
-          } else if (dir !== -1 && maxSince - x >= 0.1 && x < 0.8) {
-            transitions.push(i);
-            dir = -1;
-            minSince = x;
-          }
-        }
-        const win = Math.max(1, Math.round(fps));
-        // fenêtres glissantes d'une seconde à plus de 6 transitions ; les fenêtres qui se suivent forment un seul passage
-        const passages: number[][] = [];
-        for (let a = 0, b = 0; b < transitions.length; b++) {
-          while (transitions[b] - transitions[a] >= win) a++;
-          if (b - a + 1 <= 6) continue;
-          const last = passages[passages.length - 1];
-          if (last && transitions[a] <= last[1] + win) last[1] = transitions[b];
-          else passages.push([transitions[a], transitions[b]]);
-        }
+        const label = 'Flashs (PSE, indicatif)';
         results.push(
-          passages.length
-            ? { id: 'pse', label: 'Flashs (PSE, indicatif)', status: 'error', summary: `${passages.length} passage(s) à plus de 3 flashs par seconde`, details: passages.slice(0, 8).map(([s, e]) => ({ text: `${tcAt(frames[s].t)} → ${tcAt(frames[e].t)}` })) }
-            : { id: 'pse', label: 'Flashs (PSE, indicatif)', status: 'ok', summary: 'aucune séquence à plus de 3 flashs/s (ne remplace pas un test Harding certifié)' }
+          r.flashPassages.length
+            ? {
+                id: 'pse', label, status: 'error',
+                summary: `${r.flashPassages.length} passage(s) à plus de 3 flashs par seconde sur au moins un quart de l'écran`,
+                details: r.flashPassages.slice(0, 8).map(([sIdx, eIdx, n]) => ({ text: `${span(sIdx, eIdx)} : ${n} variations de luminance en une seconde` })),
+              }
+            : {
+                id: 'pse', label, status: 'ok',
+                summary: `aucune séquence à plus de 3 flashs/s${r.maxFlashesPerSecond ? ` (au plus ${fmtNum(r.maxFlashesPerSecond)} flash(s) en une seconde)` : ''} · ne remplace pas un test Harding certifié`,
+              }
         );
       }
     }
@@ -7873,8 +8181,8 @@ const PAD_GROUPS: { id: keyof PadCheckGroups; label: string; title: string }[] =
   { id: 'technical', label: 'Technique', title: 'Conteneur, codec, résolution, cadence, balayage, 4:2:2, débit, GOP, audio et pistes silencieuses' },
   { id: 'loudness', label: 'Loudness', title: 'Loudness intégré, LRA, True Peak, saturation' },
   { id: 'timing', label: 'Chronométrie', title: 'TC de départ, mire et 1 kHz, noir et silence avant la SOM, noirs muets et silences trop longs' },
-  { id: 'levels', label: 'Niveaux légaux', title: 'Luminance dans la plage légale 16-235 (64-940 en 10 bits)' },
-  { id: 'pse', label: 'Flashs (PSE)', title: 'Plus de 3 flashs par seconde (indicatif)' },
+  { id: 'levels', label: 'Niveaux légaux', title: 'Tolérances EBU R103 : luminance −1 % à 103 %, couleurs −5 % à 105 %, au plus 1 % de la surface' },
+  { id: 'pse', label: 'Flashs (PSE)', title: 'Plus de 3 flashs par seconde sur au moins un quart de l’écran (indicatif, règles Ofcom / BT.1702)' },
 ];
 
 export const DeliveryChecker: React.FC<{
@@ -8649,7 +8957,7 @@ const NormsSettings: React.FC<{ presets: DeliveryPreset[]; onChange: (presets: D
             {numField('gopN', 'GOP N (longueur)', 'img', 1)}
             {numField('gopM', 'GOP M (écart I/P)', 'img', 1)}
             {boolField('gopClosed', 'GOP fermé')}
-            {boolField('legalLevels', 'Niveaux légaux (16-235)')}
+            {boolField('legalLevels', 'Niveaux légaux (EBU R103)')}
             {boolField('pse', 'Flashs PSE (3/s max)')}
           </>
         ))}
@@ -10634,9 +10942,6 @@ export const ReviewMarkersHub: React.FC<ReviewMarkersHubProps> = ({ active = tru
   // hauteur de la zone de saisie, réglée avec la poignée (mémorisée)
   const [draftHeight, setDraftHeight] = useState<number>(() => readStored<number>('cutflow.reviewDraftHeight', 120));
   useEffect(() => writeStored('cutflow.reviewDraftHeight', draftHeight), [draftHeight]);
-  const [screenshotDataUrl, setScreenshotDataUrl] = useState<string | null>(null);
-  const [isAiProcessing, setIsAiProcessing] = useState<boolean>(false);
-  const [aiError, setAiError] = useState<string | null>(null);
 
   const [markers, setMarkers] = useState<ReviewMarker[]>(() => readStored<ReviewMarker[]>(REVIEW_STORAGE_KEYS.markers, []));
   const [resolvedAction, setResolvedAction] = useState<ResolvedAction>(() =>
@@ -10790,42 +11095,6 @@ export const ReviewMarkersHub: React.FC<ReviewMarkersHubProps> = ({ active = tru
     });
   };
 
-  const handleImportCapture = () => {
-    pickFile('image/*', (file) => {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const url = event.target?.result as string;
-        setScreenshotDataUrl(url);
-        analyzeScreenshotWithAI(url);
-      };
-      reader.readAsDataURL(file);
-    });
-  };
-
-  // Ctrl+V d'une capture d'écran n'importe où dans l'onglet
-  useEffect(() => {
-    const handlePaste = (e: ClipboardEvent) => {
-      const items = e.clipboardData?.items;
-      if (!items) return;
-      for (let i = 0; i < items.length; i++) {
-        if (items[i].type.indexOf('image') !== -1) {
-          const blob = items[i].getAsFile();
-          if (blob) {
-            const reader = new FileReader();
-            reader.onload = (event) => {
-              const url = event.target?.result as string;
-              setScreenshotDataUrl(url);
-              analyzeScreenshotWithAI(url);
-            };
-            reader.readAsDataURL(blob);
-          }
-        }
-      }
-    };
-    window.addEventListener('paste', handlePaste);
-    return () => window.removeEventListener('paste', handlePaste);
-  }, [currentFrameRate, categories]);
-
   // Fermer le menu d'export au clic extérieur
   useEffect(() => {
     if (!isExportMenuOpen) return;
@@ -10835,52 +11104,6 @@ export const ReviewMarkersHub: React.FC<ReviewMarkersHubProps> = ({ active = tru
     window.addEventListener('mousedown', close);
     return () => window.removeEventListener('mousedown', close);
   }, [isExportMenuOpen]);
-
-  // Analyse d'une capture par le serveur IA (Gemini) : disponible uniquement en mode développement web
-  const analyzeScreenshotWithAI = async (base64Url: string) => {
-    setIsAiProcessing(true);
-    setAiError(null);
-    try {
-      const res = await fetch('/api/parse-review-image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageBase64: base64Url,
-          mimeType: base64Url.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png',
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) throw new Error(data.error || "Erreur de traitement de l'image");
-      if (!Array.isArray(data.markers) || data.markers.length === 0) {
-        throw new Error('Aucun retour avec timecode identifié sur cette capture');
-      }
-      const converted: ReviewMarker[] = data.markers.map((item: any, idx: number) => {
-        const sec = timecodeToSeconds(item.timecode || '00:00:00:00', currentFrameRate);
-        const { tag, color, track } = inferTagAndColor(item.comment || '', categories);
-        return {
-          id: `ai-marker-${Date.now()}-${idx}`,
-          timecode: secondsToTimecode(sec, currentFrameRate, true),
-          seconds: sec,
-          durationSeconds: item.durationSeconds || 0,
-          author: item.author || 'Client',
-          comment: item.comment,
-          tag,
-          color,
-          track,
-          isResolved: false,
-          source: 'screenshot',
-        };
-      });
-      loadMarkers(converted.sort((a, b) => a.seconds - b.seconds), 'extrait(s) de la capture');
-    } catch (err: any) {
-      console.warn('Analyse IA indisponible dans le panneau installé :', err);
-      setAiError(
-        "La lecture des captures d'écran nécessite le serveur IA du projet source (clé Gemini) : elle n'est pas disponible dans le panneau installé. Copiez plutôt le texte des retours dans la zone ci-dessus."
-      );
-    } finally {
-      setIsAiProcessing(false);
-    }
-  };
 
   // Le retour reste dans la liste ; son marqueur dans Premiere suit l'option choisie
   // (retiré de la timeline, passé en vert ou préfixé [RÉSOLU]) et revient à l'état initial si on décoche
@@ -11301,7 +11524,7 @@ export const ReviewMarkersHub: React.FC<ReviewMarkersHubProps> = ({ active = tru
 
   return (
     <div className="space-y-3">
-      {/* Saisie unique : texte collé, import CSV ou capture */}
+      {/* Saisie unique : texte collé ou import CSV */}
       <section className="rounded-2xl border border-white/10 bg-zinc-900/50 p-4 space-y-3">
         <div>
           <textarea
@@ -11320,10 +11543,6 @@ export const ReviewMarkersHub: React.FC<ReviewMarkersHubProps> = ({ active = tru
               <FileSpreadsheet className="w-3.5 h-3.5" />
               Importer CSV
             </button>
-            <button onClick={handleImportCapture} className={ghostButton} title="Capture d'écran des retours (ou Ctrl+V)">
-              <ImageIcon className="w-3.5 h-3.5" />
-              Capture
-            </button>
           </div>
           <PrimaryButton onClick={handleGenerate} disabled={!rawText.trim()}>
             <Sparkles className="w-3.5 h-3.5" />
@@ -11331,11 +11550,6 @@ export const ReviewMarkersHub: React.FC<ReviewMarkersHubProps> = ({ active = tru
           </PrimaryButton>
         </div>
 
-        {screenshotDataUrl && (
-          <img src={screenshotDataUrl} alt="Capture des retours" className="max-h-40 mx-auto rounded-lg border border-white/10 object-contain" />
-        )}
-        {isAiProcessing && <StatusMessage busy message="Lecture de la capture en cours…" />}
-        {aiError && <StatusMessage isError message={aiError} />}
       </section>
 
       {/* Synchro Vimeo : dossier de dépôt des CSV */}
@@ -11921,7 +12135,7 @@ export default function App() {
 // ==================== components/AboutMori.tsx ====================
 
 /** Version affichée dans « À propos » : à garder alignée sur CSXS/manifest.xml */
-const APP_VERSION = '2.12.12';
+const APP_VERSION = '2.13.0';
 /** Version de Mori Checker (application autonome) : à garder alignée sur checker/package.json */
 const CHECKER_VERSION = '1.2.0';
 

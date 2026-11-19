@@ -1,3 +1,12 @@
+2.13.0
+- Web : un résultat de recherche s'ouvre aussitôt avec ses réglages de téléchargement ; les résolutions disponibles s'affichent dès qu'elles sont lues (YouTube met ~3 s à les donner). Les deux premiers résultats sont lus d'avance.
+- Web : un résultat téléchargé (icône ✓) se glisse directement sur la timeline ou dans un chutier, comme un fichier depuis l'Explorateur ou le Finder ; glisser un résultat pas encore téléchargé lance son téléchargement dans le dernier format choisi.
+- Web, ✂ Trim : les poignées IN et OUT se saisissent aussi par leur étiquette, et le glisser fonctionne sur Mac.
+- Checker, niveaux légaux : tolérances EBU R103 (luminance −1 % à 103 %, couleurs −5 % à 105 %, au plus 1 % de la surface) au lieu d'une erreur dès qu'un pixel sortait de 16-235 ; la couleur (gamut RGB) est maintenant vérifiée.
+- Checker, flashs : luminance mesurée en cd/m² et flash compté seulement sur au moins un quart de l'écran (règles PSE d'Ofcom / BT.1702). Fini les fausses alertes dans les scènes sombres ; les flashs clairs ou localisés sont détectés.
+- Checker, normes France TV et TF1 (RT-040) : un GOP ouvert n'est plus une erreur (l'XDCAM HD422 est toujours en GOP ouvert de 12 images) ; N=12 et M=3 restent vérifiés.
+- Retours : le bouton Capture est retiré (la lecture des captures n'existait pas dans le panneau installé).
+
 2.12.12
 - Panneau qui ne répondait plus pendant de longues minutes (chutiers, import, téléchargements) : la lecture des marqueurs de la timeline pouvait tourner en rond dans Premiere et occuper toutes ses commandes. Elle s'arrête maintenant au nombre réel de marqueurs, et aucun retour n'est retiré de la liste si la lecture est incomplète.
 - Retours : hors de l'onglet Retours, la timeline n'est relue que toutes les 30 s (toutes les 2 s avant), pour laisser Premiere plus disponible.
