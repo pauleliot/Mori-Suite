@@ -1910,20 +1910,34 @@ const MARKER_HELPERS = `
 
         // Marqueurs visibles depuis la séquence : ceux de la séquence et, si withClips, ceux des clips
         // maîtres placés dessus (temps source ramené au temps séquence de l'occurrence qui le montre)
+        // Parcours d'une collection de marqueurs, borné : au plus numMarkers pas, arrêt au premier marqueur déjà vu
+        // (getNextMarker qui tourne en rond bloquait Premiere plusieurs minutes). __markersIncomplete le signale.
+        var __markersIncomplete = false;
+        function eachMarker(coll, fn) {
+          var total = 0;
+          try { total = coll.numMarkers; } catch (e) {}
+          var k = coll.getFirstMarker(), seen = {}, steps = 0;
+          while (k && steps < total + 1) {
+            var id = String(k.guid);
+            if (seen[id]) { __markersIncomplete = true; return; }
+            seen[id] = true;
+            fn(k);
+            k = coll.getNextMarker(k);
+            steps++;
+          }
+          if (k) __markersIncomplete = true;
+        }
+
         function collectExistingMarkers(seq, withClips) {
           var list = [];
           function add(coll, owner, toSeq) {
-            var k = coll.getFirstMarker();
-            var guard = 0;
-            while (k && guard < 100000) {
+            eachMarker(coll, function (k) {
               var s = toSeq ? toSeq(k.start.seconds) : k.start.seconds;
               if (s !== null) {
                 list.push({ marker: k, coll: coll, owner: owner, guid: String(k.guid), sec: s, dur: k.end.seconds - k.start.seconds,
                   comments: String(k.comments), text: markerText(k.comments), nameText: markerText(k.name) });
               }
-              k = coll.getNextMarker(k);
-              guard++;
-            }
+            });
           }
           add(seq.markers, 'seq', null);
           if (!withClips) return list;
@@ -2203,12 +2217,16 @@ export async function shiftSequenceMarkersAfterPlayhead(delta) {
         var from = seq.getPlayerPosition().seconds;
         var delta = ${Number(delta) || 0};
         var list = [];
+        // parcours borné : au plus numMarkers pas, arrêt au premier marqueur déjà vu
+        var total = seq.markers.numMarkers, seen = {}, steps = 0;
         var k = seq.markers.getFirstMarker();
-        var guard = 0;
-        while (k && guard < 100000) {
+        while (k && steps < total + 1) {
+          var id = String(k.guid);
+          if (seen[id]) break;
+          seen[id] = true;
           if (k.start.seconds >= from - 0.0005) list.push(k);
           k = seq.markers.getNextMarker(k);
-          guard++;
+          steps++;
         }
         for (var i = 0; i < list.length; i++) {
           var m = list[i];
@@ -2264,7 +2282,7 @@ ${MARKER_HELPERS}
           var x = existing[i];
           out.push({ guid: x.guid, owner: x.owner, seconds: x.sec, durationSeconds: x.dur, comments: x.comments, text: x.text, nameText: x.nameText });
         }
-        return JSON.stringify({ success: true, seqId: String(seq.sequenceID), markers: out });
+        return JSON.stringify({ success: true, seqId: String(seq.sequenceID), markers: out, incomplete: __markersIncomplete });
       } catch (err) {
         return JSON.stringify({ success: false, error: err.toString() });
       }
@@ -10926,10 +10944,14 @@ function writeStored(key, value) {
   } catch {}
 }
 export const ReviewMarkersHub = ({
+  active = true,
   currentFrameRate,
   categories,
   onJumpToTimecode
 }) => {
+  // la boucle de lecture de la timeline lit cette valeur sans être relancée
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const [rawText, setRawText] = useState(() => readStored(REVIEW_STORAGE_KEYS.draft, ''));
   // hauteur de la zone de saisie, réglée avec la poignée (mémorisée)
   const [draftHeight, setDraftHeight] = useState(() => readStored('cutflow.reviewDraftHeight', 120));
@@ -11031,12 +11053,16 @@ export const ReviewMarkersHub = ({
       if (busy || document.hidden || base.markers.length === 0 || w.active > 0 || autoScanPaused()) return;
       const withClips = needsClips(base.markers, base.placeOn);
       tick++;
-      if (withClips && tick % 3 !== 0) return;
+      // Premiere n'exécute qu'un script à la fois pour toutes les extensions : hors de l'onglet Retours, la
+      // timeline n'est relue que toutes les 30 s (avant : toutes les 2 s, toute la journée)
+      if (!activeRef.current && tick % 15 !== 0) return;
+      if (activeRef.current && withClips && tick % 3 !== 0) return;
       busy = true;
       try {
         const gen = w.gen;
         const res = await readTimelineMarkers(withClips).catch(() => null);
-        if (stopped || !res || !res.success || !res.seqId || w.gen !== gen || w.active > 0) return;
+        // lecture incomplète (parcours des marqueurs interrompu) : rien n'est retiré de la liste sur cette base
+        if (stopped || !res || !res.success || !res.seqId || res.incomplete || w.gen !== gen || w.active > 0) return;
         const {
           markers: list,
           resolvedAction: action,
@@ -12346,6 +12372,7 @@ export default function App() {
       }), /*#__PURE__*/_jsx("div", {
         className: activeTab === 'markers' ? '' : 'hidden',
         children: mounted('markers') && /*#__PURE__*/_jsx(ReviewMarkersHub, {
+          active: activeTab === 'markers',
           currentFrameRate: frameRate,
           categories: markerCategories,
           onJumpToTimecode: s => movePlayheadTo(s).catch(() => {})
@@ -12395,7 +12422,7 @@ export default function App() {
 // ==================== components/AboutMori.tsx ====================
 
 /** Version affichée dans « À propos » : à garder alignée sur CSXS/manifest.xml */
-const APP_VERSION = '2.12.11';
+const APP_VERSION = '2.12.12';
 /** Version de Mori Checker (application autonome) : à garder alignée sur checker/package.json */
 const CHECKER_VERSION = '1.2.0';
 
